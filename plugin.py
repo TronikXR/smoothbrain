@@ -348,7 +348,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
     def _build_step3(self):
         gr.Markdown("### 🖼 Step 3 — Image Storyboard")
         gr.Markdown(
-            "Generate storyboard images for each shot. Approve the ones you like, reject to re-roll."
+            "👍 **Approve** shots you like · 👎 **Reject** to re-generate them · All must be approved to continue."
         )
 
         # ── Controls row: Manual/Auto toggle + Resolution picker ──
@@ -416,6 +416,11 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                         "reject_btn": reject_btn,
                     })
 
+        # ── Bottom generate button (so user doesn't scroll) ──
+        with gr.Row():
+            self.sb_gen_images_btn_bottom = gr.Button(
+                "🖼 Re-generate Rejected", variant="secondary", scale=2,
+            )
         with gr.Row():
             self.sb_step3_next = gr.Button(
                 "✅ Approve All & Continue →", variant="primary", interactive=False,
@@ -849,19 +854,26 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         )
 
         # Generate Images → queue renders for all pending/rejected shots
+        gen_outputs = [
+            self.sb_gen_images_status,
+            self.sb_state,
+            self.sb_progress_html,
+            self.sb_step3_next,
+            self.refresh_form_trigger,
+            *self._all_badge_outputs(),
+            *self._all_button_outputs(),
+            *self._all_image_outputs(),
+        ]
         self.sb_gen_images_btn.click(
             fn=self._queue_image_renders,
             inputs=[self.state, self.sb_state, self.sb_resolution, self.sb_auto_mode],
-            outputs=[
-                self.sb_gen_images_status,
-                self.sb_state,
-                self.sb_progress_html,
-                self.sb_step3_next,
-                self.refresh_form_trigger,
-                *self._all_badge_outputs(),
-                *self._all_button_outputs(),
-                *self._all_image_outputs(),
-            ],
+            outputs=gen_outputs,
+        )
+        # Bottom button — same handler
+        self.sb_gen_images_btn_bottom.click(
+            fn=self._queue_image_renders,
+            inputs=[self.state, self.sb_state, self.sb_resolution, self.sb_auto_mode],
+            outputs=gen_outputs,
         )
 
         # Per-shot approve/reject buttons
