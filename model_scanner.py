@@ -65,12 +65,54 @@ IMAGE_MODEL_OVERRIDES = {
         ],
         "loras_multipliers": "1|",
     },
+    # Qwen Image 2512 20B (newer version) — same speed lora
+    "qwen_image_2512_20B": {
+        "num_inference_steps": 4,
+        "guidance_scale": 1,
+        "flow_shift": 5,
+        "sample_solver": "default",
+        "image_mode": 1,
+        "video_prompt_type": "I",
+        "image_prompt_type": "",
+        "remove_background_images_ref": 1,
+        "image_refs_relative_size": 50,
+        "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
+        "activated_loras": [
+            "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
+            "loras_accelerators/Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors"
+        ],
+        "loras_multipliers": "1|",
+    },
+    # Qwen Image Edit Plus 20B — same speed lora
+    "qwen_image_edit_plus_20B": {
+        "num_inference_steps": 4,
+        "guidance_scale": 1,
+        "flow_shift": 5,
+        "sample_solver": "default",
+        "image_mode": 1,
+        "video_prompt_type": "I",
+        "image_prompt_type": "",
+        "remove_background_images_ref": 1,
+        "image_refs_relative_size": 50,
+        "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
+        "activated_loras": [
+            "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
+            "loras_accelerators/Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors"
+        ],
+        "loras_multipliers": "1|",
+    },
 }
 
 
 def get_image_model_overrides(model_id: str) -> dict:
-    """Return Smooth Brain speed-lora overrides for an image model, or {}."""
-    return dict(IMAGE_MODEL_OVERRIDES.get(model_id, {}))
+    """Return Smooth Brain speed-lora overrides for an image model, or {}.
+    Falls back to prefix matching for future qwen_image_* variants."""
+    if model_id in IMAGE_MODEL_OVERRIDES:
+        return dict(IMAGE_MODEL_OVERRIDES[model_id])
+    # Fallback: any qwen_image model gets the base qwen_image_20B overrides
+    if model_id.startswith("qwen_image"):
+        return dict(IMAGE_MODEL_OVERRIDES.get("qwen_image_20B", {}))
+    return {}
 
 
 # Priority order for auto-selecting the best video model

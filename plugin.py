@@ -1099,6 +1099,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             *self._all_button_outputs(),
             *self._all_image_outputs(),
             self.sb_image_gallery,
+            self.sb_stop_render_btn,
         ]
         self.sb_gen_images_btn.click(
             fn=self._queue_image_renders,
@@ -1254,9 +1255,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         is_auto = auto_mode == "Auto"
         n_panels = len(self.sb_storyboard_panels)
 
-        def _yield_state(status_html, sb_state, changed_shot=None):
-            """Build output list — only update the shot that just changed."""
-            # Progress bar always updates
+        def _yield_state(status_html: str, sb_state: dict, changed_shot: int = None, stop_btn_visible: bool = None):
+            """Build yield tuple for the generator, updating relevant outputs."""
+            shots = sb_state.get("shots", [])
+            shot_count = sb_state.get("shot_count", 0)
+            n_panels = N_SHOT_PANELS
+
+            # Progress bar
             approved = sum(1 for s in shots[:shot_count]
                            if s.get("status") == STATUS_APPROVED)
             progress = self._progress_bar_html(approved, shot_count)
@@ -1293,15 +1298,19 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
             gallery = self._refresh_gallery(sb_state, "images")
 
+            # Stop render button visibility
+            stop_btn = gr.update(visible=stop_btn_visible) if stop_btn_visible is not None else gr.update()
+
             return [
                 status_html,
                 progress, next_btn, gr.update(),
                 *badges, *buttons, *img_updates,
                 gallery,
+                stop_btn,
             ]
 
         if not shots:
-            yield _yield_state("<span style='color:red'>No shots to render</span>", sb_state)
+            yield _yield_state("<span style='color:red'>No shots to render</span>", sb_state, stop_btn_visible=False)
             return
         if not image_model:
             yield _yield_state("<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", sb_state)
@@ -1329,10 +1338,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         rendered = 0
         self._render_cancelled = False
 
-        # Yield initial progress (no specific shot changed)
+        # Yield initial progress — show stop button
         yield _yield_state(
             f"<span style='color:var(--primary-400)'>⏳ Rendering 0/{len(to_render)} shots...</span>",
-            sb_state,
+            sb_state, stop_btn_visible=True,
         )
 
         for task_idx, shot_i in enumerate(to_render):
@@ -1340,7 +1349,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             if self._render_cancelled:
                 yield _yield_state(
                     f"<span style='color:orange'>🛑 Render stopped. {rendered}/{len(to_render)} shots completed.</span>",
-                    sb_state,
+                    sb_state, stop_btn_visible=False,
                 )
                 return
             s = shots[shot_i]
@@ -1419,7 +1428,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             status = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(to_render)} shot image(s) generated!</span>"
         else:
             status = "<span style='color:red'>❌ No images generated. Check terminal for errors.</span>"
-        yield _yield_state(status, sb_state)
+        yield _yield_state(status, sb_state, stop_btn_visible=False)
 
     def _approve_shot(self, sb_state, shot_index):
         sb_state = dict(sb_state)
