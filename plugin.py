@@ -9,6 +9,7 @@
 from __future__ import annotations
 import copy
 import glob
+import importlib
 import os
 import time
 import traceback
@@ -447,7 +448,8 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
         with gr.Row():
             self.sb_new_project_btn = gr.Button("🗑 New Project", variant="stop", scale=0)
-            gr.Markdown("*Renders will queue in Wan2GP. Switch to the Video tab to monitor progress.*")
+            self.sb_reload_btn = gr.Button("🔄 Reload Logic", variant="secondary", scale=0)
+            self.sb_reload_status = gr.HTML("")
 
     # ── Navigation wiring ─────────────────────────────────────────────────────
 
@@ -1110,6 +1112,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                      self.sb_back_btn, self.sb_step_label],
         )
 
+        # Dev reload
+        self.sb_reload_btn.click(
+            fn=self._reload_modules,
+            inputs=[],
+            outputs=[self.sb_reload_status],
+        )
+
     def _toggle_duration_mode(self, advanced: bool, sb_state: dict):
         """Toggle Simple ↔ Advanced, updating slider max based on GPU + model."""
         new_advanced = not advanced
@@ -1238,6 +1247,49 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         clear_session()
         state = self._default_state()
         return [state, *self._step_visibility(1)]
+
+    def _reload_modules(self):
+        """Hot-reload all Python logic modules (not UI layout)."""
+        reloaded = []
+        errors = []
+        # Modules to reload in dependency order
+        module_names = [
+            "plugins.smooth_brain.prompt_guides",
+            "plugins.smooth_brain.story_templates",
+            "plugins.smooth_brain.gpu_utils",
+            "plugins.smooth_brain.model_scanner",
+            "plugins.smooth_brain.state",
+            "plugins.smooth_brain.ollama",
+        ]
+        import sys
+        for mod_name in module_names:
+            if mod_name in sys.modules:
+                try:
+                    importlib.reload(sys.modules[mod_name])
+                    reloaded.append(mod_name.split(".")[-1])
+                except Exception as e:
+                    errors.append(f"{mod_name}: {e}")
+
+        # Re-import updated symbols into this module's namespace
+        try:
+            from . import ollama as _ollama_mod
+            from . import state as _state_mod
+            from . import story_templates as _st_mod
+            from . import model_scanner as _ms_mod
+            from . import gpu_utils as _gpu_mod
+            # Update module-level refs used by plugin
+            import plugins.smooth_brain.plugin as _self_mod
+            _self_mod.ollama_pack = _ollama_mod.pack
+            _self_mod.ollama_status = _ollama_mod.get_status
+            _self_mod.is_online = _ollama_mod.is_online
+            _self_mod.refine_single_prompt = _ollama_mod.refine_single_prompt
+        except Exception as e:
+            errors.append(f"re-import: {e}")
+
+        ts = time.strftime("%H:%M:%S")
+        if errors:
+            return f"<span style='color:orange'>⚠️ [{ts}] Reloaded {', '.join(reloaded)} | Errors: {'; '.join(errors)}</span>"
+        return f"<span style='color:var(--primary-500)'>🔄 [{ts}] Reloaded: {', '.join(reloaded)}</span>"
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
