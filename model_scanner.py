@@ -38,6 +38,8 @@ IMAGE_MODEL_OVERRIDES = {
         "image_mode": 1,
         "video_prompt_type": "I",
         "image_prompt_type": "",
+        "remove_background_images_ref": 1,
+        "image_refs_relative_size": 50,
         "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
         "activated_loras": [
             "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
@@ -54,6 +56,8 @@ IMAGE_MODEL_OVERRIDES = {
         "image_mode": 1,
         "video_prompt_type": "I",
         "image_prompt_type": "",
+        "remove_background_images_ref": 1,
+        "image_refs_relative_size": 50,
         "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
         "activated_loras": [
             "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
