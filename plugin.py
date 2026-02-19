@@ -430,6 +430,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
     def _build_step4(self):
         gr.Markdown("### 🎬 Step 4 — Video Export")
+        gr.Markdown(
+            "👍 **Approve** videos you like · 👎 **Reject** to re-render them · All must be approved to finish."
+        )
 
         # GPU badge
         gpu = self._gpu_info
@@ -446,19 +449,59 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         self.sb_shot_duration = gr.Slider(
             label="Duration (seconds)",
             minimum=2.0,
-            maximum=10.0,   # Will be updated on load based on GPU + model
+            maximum=10.0,
             value=5.0,
             step=0.5,
         )
         self.sb_duration_hint = gr.HTML("")
         self.sb_export_summary = gr.HTML("")
 
+        # ── Progress bar ──
+        self.sb_vid_progress_html = gr.HTML(self._progress_bar_html(0, 0))
+
+        # ── Generate button + status ──
         with gr.Row():
             self.sb_export_btn = gr.Button("🎬 Export All Videos", variant="primary", scale=2)
             with gr.Column(scale=3):
                 self.sb_export_status = gr.HTML("")
 
-        self.sb_progress_md = gr.Markdown("")
+        # ── Video shot card grid ──
+        self.sb_video_panels: List[Dict[str, Any]] = []
+        with gr.Column(elem_id="sb-video-grid"):
+            for i in range(MAX_SHOTS):
+                with gr.Group(visible=False, elem_id=f"sb-vid-card-{i}") as grp:
+                    with gr.Row():
+                        vid_badge = gr.HTML(
+                            f"<span style='font-weight:700'>Shot {i+1}</span> "
+                            f"<span style='opacity:0.5;font-size:11px'>⏳ pending</span>"
+                        )
+                    vid_prompt_md = gr.Markdown("", elem_id=f"sb-vid-prompt-{i}")
+                    vid = gr.Video(
+                        label=f"Shot {i+1} Video",
+                        height=220,
+                        interactive=False,
+                    )
+                    with gr.Row():
+                        vid_approve_btn = gr.Button("👍", size="sm", visible=False)
+                        vid_reject_btn = gr.Button("👎", size="sm", visible=False)
+
+                    self.sb_video_panels.append({
+                        "group": grp,
+                        "badge": vid_badge,
+                        "prompt_md": vid_prompt_md,
+                        "video": vid,
+                        "approve_btn": vid_approve_btn,
+                        "reject_btn": vid_reject_btn,
+                    })
+
+        # ── Bottom re-generate button ──
+        with gr.Row():
+            self.sb_export_btn_bottom = gr.Button(
+                "🎬 Re-render Rejected", variant="secondary", scale=2,
+            )
+
+        # Remove old progress markdown — replaced by cards
+        self.sb_progress_md = gr.Markdown("", visible=False)
 
         with gr.Row():
             self.sb_new_project_btn = gr.Button("🗑 New Project", variant="stop", scale=0)
@@ -490,7 +533,11 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             outputs=[*step_outputs, self.sb_char_description],
         )
         # sb_step2_next is wired in _wire_step2 (combines save + navigate)
-        self.sb_step3_next.click(fn=lambda: self._step_visibility(4), inputs=[], outputs=step_outputs)
+        self.sb_step3_next.click(
+            fn=self._enter_step4,
+            inputs=[self.sb_state],
+            outputs=[*step_outputs, *self._all_vid_panel_outputs()],
+        )
         self.sb_back_btn.click(fn=self._go_back, inputs=[self.sb_state], outputs=step_outputs)
 
     def _go_back(self, state_dict: dict):
@@ -1188,12 +1235,50 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             outputs=[self.sb_advanced_duration, self.sb_duration_mode_btn, self.sb_shot_duration],
         )
 
-        # Export — renders in-process, no tab switch needed
+        # Export — renders in-process with per-shot progress
+        export_outputs = [
+            self.sb_export_status,
+            self.sb_state,
+            self.sb_vid_progress_html,
+            *self._all_vid_badge_outputs(),
+            *self._all_vid_button_outputs(),
+            *self._all_vid_video_outputs(),
+            *self._all_vid_prompt_outputs(),
+        ]
         self.sb_export_btn.click(
             fn=self._export_videos,
             inputs=[self.state, self.sb_state, self.sb_shot_duration],
-            outputs=[self.sb_export_status, self.sb_progress_md],
+            outputs=export_outputs,
         )
+        # Bottom button — same handler
+        self.sb_export_btn_bottom.click(
+            fn=self._export_videos,
+            inputs=[self.state, self.sb_state, self.sb_shot_duration],
+            outputs=export_outputs,
+        )
+
+        # Per-shot video approve/reject buttons
+        for i, panel in enumerate(self.sb_video_panels):
+            panel["approve_btn"].click(
+                fn=lambda state, idx=i: self._approve_video_shot(state, idx),
+                inputs=[self.sb_state],
+                outputs=[
+                    self.sb_state,
+                    self.sb_vid_progress_html,
+                    *self._all_vid_badge_outputs(),
+                    *self._all_vid_button_outputs(),
+                ],
+            )
+            panel["reject_btn"].click(
+                fn=lambda state, idx=i: self._reject_video_shot(state, idx),
+                inputs=[self.sb_state],
+                outputs=[
+                    self.sb_state,
+                    self.sb_vid_progress_html,
+                    *self._all_vid_badge_outputs(),
+                    *self._all_vid_button_outputs(),
+                ],
+            )
 
         # New project
         self.sb_new_project_btn.click(
@@ -1235,75 +1320,230 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         )
         return f"<small>{duration}s{note}{gpu_note}</small>"
 
-    def _export_videos(self, wan2gp_state, sb_state, shot_duration):
-        """Generator: render video shots one at a time with progress."""
+    # ── Step 4 helpers ────────────────────────────────────────────────────────
+
+    def _enter_step4(self, sb_state):
+        """Navigate to Step 4 and populate video cards."""
+        step_updates = list(self._step_visibility(4))
+        panel_updates = self._make_video_panel_updates(sb_state)
+        return [*step_updates, *panel_updates]
+
+    def _all_vid_panel_outputs(self):
+        """All outputs needed to populate video cards (group + badge + prompt)."""
+        out = []
+        for p in self.sb_video_panels:
+            out.extend([p["group"], p["badge"], p["prompt_md"]])
+        return out
+
+    def _all_vid_badge_outputs(self):
+        return [p["badge"] for p in self.sb_video_panels]
+
+    def _all_vid_button_outputs(self):
+        out = []
+        for p in self.sb_video_panels:
+            out.extend([p["approve_btn"], p["reject_btn"]])
+        return out
+
+    def _all_vid_video_outputs(self):
+        return [p["video"] for p in self.sb_video_panels]
+
+    def _all_vid_prompt_outputs(self):
+        return [p["prompt_md"] for p in self.sb_video_panels]
+
+    def _make_video_panel_updates(self, sb_state):
+        """Build initial updates for video cards (visibility, prompts)."""
         shots = sb_state.get("shots", [])
+        shot_count = sb_state.get("shot_count", 6)
+        updates = []
+        for i, panel in enumerate(self.sb_video_panels):
+            visible = i < shot_count
+            if i < len(shots):
+                beat = shots[i].get("beat", "")
+                vprompt = shots[i].get("video_prompt", "")
+                prompt_text = f"*{vprompt[:200]}*" if vprompt else f"*{beat}*" if beat else ""
+                vs = shots[i].get("video_status", STATUS_PENDING)
+            else:
+                prompt_text = ""
+                vs = STATUS_PENDING
+            updates.extend([
+                gr.update(visible=visible),
+                gr.update(value=self._shot_badge_html(i, vs)),
+                gr.update(value=prompt_text),
+            ])
+        return updates
+
+    def _approve_video_shot(self, sb_state, shot_index):
+        sb_state = dict(sb_state)
+        shots = list(sb_state.get("shots", []))
+        if shot_index < len(shots):
+            shots[shot_index] = dict(shots[shot_index])
+            shots[shot_index]["video_status"] = STATUS_APPROVED
+        sb_state["shots"] = shots
+        shot_count = sb_state.get("shot_count", 6)
+        approved = sum(1 for s in shots[:shot_count]
+                       if s.get("video_status") == STATUS_APPROVED)
+        progress = self._progress_bar_html(approved, shot_count)
+        badges = []
+        for i in range(len(self.sb_video_panels)):
+            if i == shot_index:
+                vs = shots[i].get("video_status", STATUS_PENDING) if i < len(shots) else STATUS_PENDING
+                badges.append(gr.update(value=self._shot_badge_html(i, vs)))
+            else:
+                badges.append(gr.update())
+        buttons = []
+        for i in range(len(self.sb_video_panels)):
+            if i == shot_index:
+                buttons.extend([gr.update(visible=False), gr.update(visible=False)])
+            else:
+                buttons.extend([gr.update(), gr.update()])
+        return [sb_state, progress, *badges, *buttons]
+
+    def _reject_video_shot(self, sb_state, shot_index):
+        sb_state = dict(sb_state)
+        shots = list(sb_state.get("shots", []))
+        if shot_index < len(shots):
+            shots[shot_index] = dict(shots[shot_index])
+            shots[shot_index]["video_status"] = STATUS_REJECTED
+        sb_state["shots"] = shots
+        shot_count = sb_state.get("shot_count", 6)
+        approved = sum(1 for s in shots[:shot_count]
+                       if s.get("video_status") == STATUS_APPROVED)
+        progress = self._progress_bar_html(approved, shot_count)
+        badges = []
+        for i in range(len(self.sb_video_panels)):
+            if i == shot_index:
+                vs = shots[i].get("video_status", STATUS_PENDING) if i < len(shots) else STATUS_PENDING
+                badges.append(gr.update(value=self._shot_badge_html(i, vs)))
+            else:
+                badges.append(gr.update())
+        buttons = []
+        for i in range(len(self.sb_video_panels)):
+            if i == shot_index:
+                buttons.extend([gr.update(visible=False), gr.update(visible=False)])
+            else:
+                buttons.extend([gr.update(), gr.update()])
+        return [sb_state, progress, *badges, *buttons]
+
+    def _export_videos(self, wan2gp_state, sb_state, shot_duration):
+        """Generator: render video shots one at a time with per-card progress."""
+        sb_state = dict(sb_state)
+        shots = [dict(s) for s in sb_state.get("shots", [])]
+        sb_state["shots"] = shots
         video_model = sb_state.get("video_model", "")
         vibe = sb_state.get("vibe", "cinematic")
         shot_count = sb_state.get("shot_count", 6)
         resolution = sb_state.get("resolution", "480p")
+        n_panels = len(self.sb_video_panels)
+
+        # Video status constants (reuse image ones)
+        V_PENDING = STATUS_PENDING
+        V_RENDERING = STATUS_RENDERING
+        V_READY = STATUS_READY
+        V_APPROVED = STATUS_APPROVED
+        V_REJECTED = STATUS_REJECTED
+
+        def _yield_state(status_html, sb_state, changed_shot=None):
+            """Build output — only update specific shot's card."""
+            approved = sum(1 for s in shots[:shot_count]
+                           if s.get("video_status") == V_APPROVED)
+            progress = self._progress_bar_html(approved, shot_count)
+
+            badges = []
+            for i in range(n_panels):
+                if changed_shot is not None and i == changed_shot:
+                    vs = shots[i].get("video_status", V_PENDING) if i < len(shots) else V_PENDING
+                    badges.append(gr.update(value=self._shot_badge_html(i, vs)))
+                else:
+                    badges.append(gr.update())
+
+            buttons = []
+            for i in range(n_panels):
+                if changed_shot is not None and i == changed_shot:
+                    vs = shots[i].get("video_status", V_PENDING) if i < len(shots) else V_PENDING
+                    show = (vs == V_READY)
+                    buttons.extend([gr.update(visible=show), gr.update(visible=show)])
+                else:
+                    buttons.extend([gr.update(), gr.update()])
+
+            vid_updates = []
+            for i in range(n_panels):
+                if changed_shot is not None and i == changed_shot:
+                    path = shots[i].get("video_path") if i < len(shots) else None
+                    vid_updates.append(gr.update(value=path) if path else gr.update())
+                else:
+                    vid_updates.append(gr.update())
+
+            prompt_updates = [gr.update()] * n_panels  # Don't touch prompts mid-render
+
+            return [
+                status_html,
+                sb_state, progress,
+                *badges, *buttons, *vid_updates, *prompt_updates,
+            ]
 
         if not shots:
-            yield "<span style='color:red'>No shots found. Go back to Step 1.</span>", ""
+            yield _yield_state("<span style='color:red'>No shots found.</span>", sb_state)
             return
         if not video_model:
-            yield "<span style='color:red'>No video model selected. Go back to Step 1.</span>", ""
+            yield _yield_state("<span style='color:red'>No video model selected.</span>", sb_state)
             return
 
-        # Build list of shots to render
-        to_render = []  # (shot_index, task_params)
+        # Identify shots to render (pending or rejected)
+        to_render = []
         errors = []
         for i, s in enumerate(shots[:shot_count]):
-            raw_prompt = s.get("video_prompt") or s.get("beat") or ""
-            if not raw_prompt:
-                continue
-            prompt = refine_single_prompt(raw_prompt, video_model, purpose="video")
-            print(f"[SmoothBrain] Shot {i+1} video → {prompt[:120]}")
-            try:
-                shot_obj = ShotState(
-                    beat=s.get("beat", ""),
-                    image_prompt=s.get("image_prompt", ""),
-                    video_prompt=prompt,
-                    ref_image_path=s.get("ref_image_path"),
-                    seed=s.get("seed", -1),
-                )
-                try:
-                    defaults = self.get_default_settings(video_model)
-                except Exception:
-                    defaults = {}
-                params = build_video_params(shot_obj, video_model, shot_duration, vibe, defaults)
-                res_str = VIDEO_RESOLUTION.get(vibe, {}).get(resolution, "832x480")
-                params["resolution"] = res_str
-                ref_path = s.get("ref_image_path")
-                if ref_path and os.path.exists(ref_path):
-                    params["image_start"] = ref_path
-                to_render.append((i, prompt, params))
-            except Exception as e:
-                errors.append(f"Shot {i+1}: {e}")
+            vs = s.get("video_status", V_PENDING)
+            if vs in (V_PENDING, V_REJECTED):
+                raw_prompt = s.get("video_prompt") or s.get("beat") or ""
+                if raw_prompt:
+                    prompt = refine_single_prompt(raw_prompt, video_model, purpose="video")
+                    try:
+                        shot_obj = ShotState(
+                            beat=s.get("beat", ""),
+                            image_prompt=s.get("image_prompt", ""),
+                            video_prompt=prompt,
+                            ref_image_path=s.get("ref_image_path"),
+                            seed=s.get("seed", -1),
+                        )
+                        try:
+                            defaults = self.get_default_settings(video_model)
+                        except Exception:
+                            defaults = {}
+                        params = build_video_params(shot_obj, video_model, shot_duration, vibe, defaults)
+                        res_str = VIDEO_RESOLUTION.get(vibe, {}).get(resolution, "832x480")
+                        params["resolution"] = res_str
+                        ref_path = s.get("ref_image_path")
+                        if ref_path and os.path.exists(ref_path):
+                            params["image_start"] = ref_path
+                        to_render.append((i, prompt, params))
+                    except Exception as e:
+                        errors.append(f"Shot {i+1}: {e}")
 
         if not to_render:
-            err_msg = "; ".join(errors) if errors else "No shots with prompts"
-            yield f"<span style='color:red'>❌ {err_msg}</span>", ""
+            err_msg = "; ".join(errors) if errors else "No pending shots"
+            yield _yield_state(f"<span style='color:orange'>{err_msg}</span>", sb_state)
             return
 
-        # Yield initial status
-        yield (
+        rendered = 0
+
+        # Yield initial
+        yield _yield_state(
             f"<span style='color:var(--primary-400)'>⏳ Rendering 0/{len(to_render)} videos...</span>",
-            "",
+            sb_state,
         )
 
-        rendered = 0
-        progress_lines = []
-
         for task_idx, (shot_i, prompt, params) in enumerate(to_render):
-            beat_preview = (shots[shot_i].get('beat', '') or '')[:60]
+            s = shots[shot_i]
+            s["video_status"] = V_RENDERING
+            # Store the refined prompt for display
+            s["video_prompt_used"] = prompt
+            print(f"[SmoothBrain] Shot {shot_i+1} video → {prompt[:120]}")
 
-            # Yield "rendering" status
-            yield (
+            yield _yield_state(
                 f"<span style='color:var(--primary-400)'>"
                 f"🎬 <b>Rendering shot {shot_i+1}</b> ({task_idx+1}/{len(to_render)})..."
                 f"<br><small>Check terminal for live progress.</small></span>",
-                "\n".join(progress_lines) if progress_lines else "*Starting...*",
+                sb_state, changed_shot=shot_i,
             )
 
             task = self._build_task(prompt, video_model, params)
@@ -1317,28 +1557,25 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             if success:
                 output_path = self._find_newest_output(since_ts=before_ts, output_type="video")
                 if output_path:
-                    shots[shot_i]["video_path"] = output_path
+                    s["video_path"] = output_path
+                    s["video_status"] = V_APPROVED  # Auto-approve for now
                     rendered += 1
-                    progress_lines.append(f"✅ **Shot {shot_i+1}**: {beat_preview}")
+                    print(f"  Shot {shot_i+1} → {output_path}")
                 else:
-                    progress_lines.append(f"❌ **Shot {shot_i+1}**: {beat_preview} — no output")
+                    s["video_status"] = V_PENDING
             else:
-                progress_lines.append(f"❌ **Shot {shot_i+1}**: {beat_preview} — render failed")
+                s["video_status"] = V_PENDING
 
-            # Yield after each shot completes
-            yield (
+            yield _yield_state(
                 f"<span style='color:var(--primary-400)'>✅ {rendered}/{len(to_render)} videos done...</span>",
-                "\n".join(progress_lines),
+                sb_state, changed_shot=shot_i,
             )
-
-        if errors:
-            progress_lines.extend([f"⚠️ {e}" for e in errors])
 
         if rendered > 0:
             status = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(to_render)} video(s) rendered!</span>"
         else:
             status = "<span style='color:red'>❌ No videos generated. Check terminal for errors.</span>"
-        yield status, "\n".join(progress_lines)
+        yield _yield_state(status, sb_state)
 
     def _new_project(self):
         clear_session()
