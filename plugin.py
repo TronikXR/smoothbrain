@@ -860,6 +860,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 self.refresh_form_trigger,
                 *self._all_badge_outputs(),
                 *self._all_button_outputs(),
+                *self._all_image_outputs(),
             ],
         )
 
@@ -898,6 +899,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         for p in self.sb_storyboard_panels:
             out.extend([p["approve_btn"], p["reject_btn"]])
         return out
+
+    def _all_image_outputs(self):
+        return [p["img"] for p in self.sb_storyboard_panels]
 
     def _progress_bar_html(self, approved: int, total: int) -> str:
         pct = round((approved / total) * 100) if total > 0 else 0
@@ -967,114 +971,122 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         return ""
 
     def _queue_image_renders(self, wan2gp_state, sb_state, resolution, auto_mode):
+        """Generator: render shots one at a time and yield progress + images."""
         sb_state = dict(sb_state)
-        shots = sb_state.get("shots", [])
+        shots = [dict(s) for s in sb_state.get("shots", [])]
+        sb_state["shots"] = shots
         image_model = sb_state.get("image_model", "")
         vibe = sb_state.get("vibe", "cinematic")
         shot_count = sb_state.get("shot_count", 6)
         is_auto = auto_mode == "Auto"
+        n_img = len(self.sb_storyboard_panels)  # for gr.update() padding
+
+        def _yield_state(status_html, sb_state):
+            """Build a full output list for the generator yield."""
+            progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
+            img_updates = []
+            for i in range(n_img):
+                if i < len(shots):
+                    path = shots[i].get("ref_image_path")
+                    img_updates.append(gr.update(value=path) if path else gr.update())
+                else:
+                    img_updates.append(gr.update())
+            return [
+                status_html,
+                sb_state, progress, next_btn, gr.update(),
+                *badges, *buttons, *img_updates,
+            ]
 
         if not shots:
-            progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
-            return [
-                "<span style='color:red'>No shots to render</span>",
-                sb_state, progress, next_btn, gr.update(),
-                *badges, *buttons,
-            ]
+            yield _yield_state("<span style='color:red'>No shots to render</span>", sb_state)
+            return
         if not image_model:
-            progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
-            return [
-                "<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>",
-                sb_state, progress, next_btn, gr.update(),
-                *badges, *buttons,
-            ]
+            yield _yield_state("<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", sb_state)
+            return
 
-        # Build render tasks for all pending/rejected shots
+        # Identify shots to render
         res_str = RESO_MAP.get(vibe, {}).get(resolution, "832x480")
-        tasks = []
-        task_shot_indices = []  # Map task index → shot index
+        to_render = []
         for i, s in enumerate(shots[:shot_count]):
-            s = dict(s)
-            shots[i] = s
             status = s.get("status", STATUS_PENDING)
             if status in (STATUS_PENDING, STATUS_REJECTED):
                 raw_prompt = s.get("image_prompt") or s.get("beat") or ""
-                if not raw_prompt:
-                    continue
-                prompt = refine_single_prompt(raw_prompt, image_model, purpose="image")
-                print(f"[SmoothBrain] Shot {i+1} image → {prompt[:120]}")
-                extra = {
-                    "resolution": res_str,
-                    "image_mode": 1,  # PNG output
-                    "seed": s.get("seed", -1),
-                }
-                # Attach character reference if present
-                char_images = sb_state.get("character_images", [])
-                if char_images:
-                    ref = next((c for c in char_images if c), None)
-                    if ref and os.path.exists(ref):
-                        extra["image_start"] = ref
-                tasks.append(self._build_task(prompt, image_model, extra))
-                task_shot_indices.append(i)
-                s["status"] = STATUS_RENDERING
+                if raw_prompt:
+                    to_render.append(i)
 
-        sb_state["shots"] = shots
+        if not to_render:
+            yield _yield_state("<span style='color:orange'>No pending shots to generate.</span>", sb_state)
+            return
+
+        # Get character reference image
+        char_images = sb_state.get("character_images", [])
+        char_ref = next((c for c in char_images if c and os.path.exists(c)), None)
+
         sb_state["resolution"] = resolution
-
-        if not tasks:
-            progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
-            return [
-                "<span style='color:orange'>No pending shots to generate.</span>",
-                sb_state, progress, next_btn, gr.update(),
-                *badges, *buttons,
-            ]
-
-        # Run all image tasks in-process (headless render)
-        gr.Info(f"🎨 Rendering {len(tasks)} shot image(s)... this may take a while.")
-        before_ts = time.time()
-        try:
-            success = self._run_render_tasks(tasks)
-        except Exception as e:
-            traceback.print_exc()
-            success = False
-
-        # Scan outputs for generated images and assign to shots
-        cfg = self.server_config if hasattr(self, 'server_config') and self.server_config else {}
-        out_dir = cfg.get("image_save_path", cfg.get("save_path", "outputs"))
-        if not os.path.isabs(out_dir):
-            wgp_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            out_dir = os.path.join(wgp_dir, out_dir)
-        img_exts = [".png", ".jpg", ".jpeg", ".webp"]
-        recent = []
-        if os.path.isdir(out_dir):
-            for ext in img_exts:
-                recent.extend(glob.glob(os.path.join(out_dir, f"*{ext}")))
-            recent = [f for f in recent if os.path.getmtime(f) >= before_ts]
-            recent.sort(key=os.path.getmtime)
-
-        # Assign outputs to shots in task order
         rendered = 0
-        for idx, shot_i in enumerate(task_shot_indices):
-            if idx < len(recent):
-                shots[shot_i]["ref_image_path"] = recent[idx]
-                shots[shot_i]["status"] = STATUS_APPROVED if is_auto else STATUS_READY
-                rendered += 1
+
+        # Yield initial progress
+        yield _yield_state(
+            f"<span style='color:var(--primary-400)'>⏳ Rendering 0/{len(to_render)} shots...</span>",
+            sb_state,
+        )
+
+        for task_idx, shot_i in enumerate(to_render):
+            s = shots[shot_i]
+            raw_prompt = s.get("image_prompt") or s.get("beat") or ""
+            prompt = refine_single_prompt(raw_prompt, image_model, purpose="image")
+            print(f"[SmoothBrain] Shot {shot_i+1} image → {prompt[:120]}")
+
+            extra = {
+                "resolution": res_str,
+                "image_mode": 1,
+                "seed": s.get("seed", -1),
+            }
+            if char_ref:
+                extra["image_start"] = char_ref
+
+            task = self._build_task(prompt, image_model, extra)
+            s["status"] = STATUS_RENDERING
+
+            # Yield rendering status
+            yield _yield_state(
+                f"<span style='color:var(--primary-400)'>"
+                f"🎨 <b>Rendering shot {shot_i+1}</b> ({task_idx+1}/{len(to_render)})..."
+                f"<br><small>Check terminal for live progress.</small></span>",
+                sb_state,
+            )
+
+            before_ts = time.time()
+            try:
+                success = self._run_render_tasks([task])
+            except Exception as e:
+                traceback.print_exc()
+                success = False
+
+            if success:
+                output_path = self._find_newest_output(since_ts=before_ts, output_type="image")
+                if output_path:
+                    s["ref_image_path"] = output_path
+                    s["status"] = STATUS_APPROVED if is_auto else STATUS_READY
+                    rendered += 1
+                    print(f"  Shot {shot_i+1} → {output_path}")
+                else:
+                    s["status"] = STATUS_PENDING
             else:
-                shots[shot_i]["status"] = STATUS_PENDING  # Reset if no output
+                s["status"] = STATUS_PENDING
 
-        sb_state["shots"] = shots
-        progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
+            # Yield updated UI with image
+            yield _yield_state(
+                f"<span style='color:var(--primary-400)'>✅ {rendered}/{len(to_render)} shots done...</span>",
+                sb_state,
+            )
 
+        # Final status
         if rendered > 0:
-            status_html = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(tasks)} shot image(s) generated!</span>"
+            status = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(to_render)} shot image(s) generated!</span>"
         else:
-            status_html = "<span style='color:red'>❌ No images generated. Check terminal for errors.</span>"
-
-        return [
-            status_html,
-            sb_state, progress, next_btn, time.time(),
-            *badges, *buttons,
-        ]
+            status = "<span style='color:red'>❌ No images generated. Check terminal for errors.</span>"
+        yield _yield_state(status, sb_state)
 
     def _approve_shot(self, sb_state, shot_index):
         sb_state = dict(sb_state)
@@ -1105,6 +1117,8 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         return out
 
     def _make_storyboard_updates(self, shots, shot_count, char_choices):
+        # Default char ref to first real character if available
+        default_char = char_choices[1] if len(char_choices) > 1 else "None"
         updates = []
         for i, panel in enumerate(self.sb_storyboard_panels):
             visible = i < shot_count
@@ -1114,7 +1128,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 gr.update(visible=visible),
                 gr.update(value=self._shot_badge_html(i, status)),
                 gr.update(value=f"*{beat}*" if beat else ""),
-                gr.update(choices=char_choices),
+                gr.update(choices=char_choices, value=default_char),
             ])
         return updates
 
