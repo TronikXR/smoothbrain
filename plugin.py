@@ -280,30 +280,39 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         gr.Markdown("Who's in your story? Upload a reference image or generate one with AI.")
 
         # ── Upload / Generate tabs ──
-        with gr.Tab("📷 I Have an Image"):
-            gr.Markdown(
-                "<small>Drag in a single image of your character(s). "
-                "If there are multiple characters, put them all in one image.</small>"
-            )
-            self.sb_char_image = gr.Image(
-                label="Character Reference",
-                type="filepath",
-                interactive=True,
-                height=250,
-            )
-
-        with gr.Tab("🎨 Generate One"):
-            self.sb_char_description = gr.Textbox(
-                label="Character Description",
-                placeholder="A grizzled astronaut with a scar across his left cheek, wearing a retro-futuristic suit...",
-                lines=3,
-            )
-            with gr.Row():
-                self.sb_char_gen_btn = gr.Button(
-                    "🎨 Generate Character Image", variant="primary", scale=2,
+        with gr.Tabs():
+            with gr.Tab("📷 I Have an Image"):
+                gr.Markdown(
+                    "<small>Drag in a single image of your character(s). "
+                    "If there are multiple characters, put them all in one image.</small>"
                 )
-                with gr.Column(scale=3):
-                    self.sb_char_gen_status = gr.HTML("")
+                self.sb_char_upload = gr.Image(
+                    label="Upload Character Image",
+                    type="filepath",
+                    interactive=True,
+                    height=200,
+                )
+
+            with gr.Tab("🎨 Generate One"):
+                self.sb_char_description = gr.Textbox(
+                    label="Character Description",
+                    placeholder="A grizzled astronaut with a scar across his left cheek, wearing a retro-futuristic suit...",
+                    lines=3,
+                )
+                with gr.Row():
+                    self.sb_char_gen_btn = gr.Button(
+                        "🎨 Generate Character Image", variant="primary", scale=2,
+                    )
+                    with gr.Column(scale=3):
+                        self.sb_char_gen_status = gr.HTML("")
+
+        # ── Character image result (visible from either tab) ──
+        self.sb_char_image = gr.Image(
+            label="Character Reference",
+            type="filepath",
+            interactive=False,
+            height=250,
+        )
 
         # ── Story reminder ──
         self.sb_story_reminder = gr.HTML("")
@@ -631,7 +640,14 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             outputs=[self.sb_char_reso_warn],
         )
 
-        # Generate character image
+        # Upload → sync to result display
+        self.sb_char_upload.change(
+            fn=lambda img: img,
+            inputs=[self.sb_char_upload],
+            outputs=[self.sb_char_image],
+        )
+
+        # Generate character image (generator for live progress)
         self.sb_char_gen_btn.click(
             fn=self._generate_character,
             inputs=[self.state, self.sb_state, self.sb_char_description, self.sb_char_resolution],
@@ -746,46 +762,64 @@ class SmoothBrainPlugin(WAN2GPPlugin):
     # ── Step 2: Character Generation ─────────────────────────────────────
 
     def _generate_character(self, wan2gp_state, sb_state, description, resolution):
-        """Generate a character image in-process (no tab switching)."""
+        """Generate a character image in-process with live progress."""
         image_model = sb_state.get("image_model", "")
         vibe = sb_state.get("vibe", "cinematic")
         if not description.strip():
-            return "<span style='color:orange'>Enter a character description first.</span>", gr.update()
+            yield "<span style='color:orange'>Enter a character description first.</span>", gr.update()
+            return
         if not image_model:
-            return "<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", gr.update()
+            yield "<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", gr.update()
+            return
         try:
+            # Phase 1: Refine prompt
+            yield (
+                "<span style='color:var(--primary-400)'>"
+                "⏳ <b>Refining prompt</b> using model guide...</span>",
+                gr.update(),
+            )
+            refined = refine_single_prompt(description.strip(), image_model, purpose="image")
+            print(f"[SmoothBrain] Character gen → model={image_model}")
+            print(f"  Prompt: {refined[:200]}")
+
             res_str = RESO_MAP.get(vibe, {}).get(resolution, "832x480")
             extra = {
                 "resolution": res_str,
                 "image_mode": 1,  # PNG output, not video
                 "seed": -1,
             }
-            # Refine prompt using the image model's guide
-            refined = refine_single_prompt(description.strip(), image_model, purpose="image")
-            print(f"[SmoothBrain] Character gen → model={image_model}")
-            print(f"  Prompt: {refined[:200]}")
             task = self._build_task(refined, image_model, extra)
             before_ts = time.time()
-            gr.Info("🎨 Generating character image... this may take a moment.")
+
+            # Phase 2: Render
+            yield (
+                "<span style='color:var(--primary-400)'>"
+                "🎨 <b>Generating image</b> — this may take a minute or two..."
+                "<br><small>Check terminal for live progress.</small></span>",
+                gr.update(),
+            )
             success = self._run_render_tasks([task])
+
             if success:
                 output_path = self._find_newest_output(since_ts=before_ts, output_type="image")
                 if output_path:
-                    return (
-                        f"<span style='color:var(--primary-500)'>✅ Character image generated!</span>",
+                    yield (
+                        "<span style='color:var(--primary-500)'>✅ Character image generated!</span>",
                         output_path,
                     )
-                return (
+                    return
+                yield (
                     "<span style='color:orange'>⚠️ Render finished but output file not found in outputs/.</span>",
                     gr.update(),
                 )
-            return (
+                return
+            yield (
                 "<span style='color:red'>❌ Render failed. Check terminal for details.</span>",
                 gr.update(),
             )
         except Exception as e:
             traceback.print_exc()
-            return f"<span style='color:red'>Error: {e}</span>", gr.update()
+            yield f"<span style='color:red'>Error: {e}</span>", gr.update()
 
     def _save_characters_and_advance(self, state_dict, char_image):
         """Save character data, prefill concept, then navigate to Step 3."""
