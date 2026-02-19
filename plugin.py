@@ -24,6 +24,8 @@ from .state import (
     save_session, load_session, clear_session,
     build_video_params, is_ltx_model, vibe_to_resolution,
     duration_to_frames, session_age_minutes,
+    create_project_dir, save_project, load_project,
+    list_recent_projects, copy_to_project, scan_project_gallery,
 )
 from .story_templates import ALL_GENRES
 from .model_scanner import (
@@ -170,6 +172,29 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                       image_choices, image_values, best_image_name):
         gr.Markdown("### 📝 Step 1 — Story Setup")
         gr.Markdown("Describe your concept and choose a model. The AI will generate cinematic shot beats.")
+
+        # ── Recent Projects ───────────────────────────────────────────
+        projects = list_recent_projects()
+        project_items = [f"📂 {p['concept'][:40]} (Step {p['step']}, {p['age_str']})" for p in projects]
+        project_items.append("📁 Import from folder...")
+        self._recent_project_data = projects  # stash for the resume handler
+
+        with gr.Group():
+            gr.Markdown("**📂 Recent Projects**")
+            with gr.Row():
+                self.sb_recent_projects = gr.Dropdown(
+                    choices=project_items if projects else ["No recent projects"],
+                    value=None,
+                    label="Resume a project",
+                    interactive=bool(projects),
+                    scale=3,
+                )
+                self.sb_resume_btn = gr.Button("▶ Resume", variant="primary", scale=1, interactive=bool(projects))
+            self.sb_import_path = gr.Textbox(
+                label="Project folder path",
+                placeholder="Paste full path to a project folder...",
+                visible=False,
+            )
 
         with gr.Row():
             self.sb_concept = gr.Textbox(
@@ -416,6 +441,15 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                         "reject_btn": reject_btn,
                     })
 
+        # ── Project image gallery ──
+        self.sb_image_gallery = gr.Gallery(
+            label="📁 All Generated Images",
+            columns=6,
+            height=140,
+            interactive=False,
+            visible=False,
+        )
+
         # ── Bottom generate button (so user doesn't scroll) ──
         with gr.Row():
             self.sb_gen_images_btn_bottom = gr.Button(
@@ -494,6 +528,15 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                         "reject_btn": vid_reject_btn,
                     })
 
+        # ── Project video gallery ──
+        self.sb_video_gallery = gr.Gallery(
+            label="📁 All Generated Videos",
+            columns=4,
+            height=160,
+            interactive=False,
+            visible=False,
+        )
+
         # ── Bottom re-generate button ──
         with gr.Row():
             self.sb_export_btn_bottom = gr.Button(
@@ -526,11 +569,11 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             self.step3_panel, self.step4_panel,
             self.sb_back_btn, self.sb_step_label,
         ]
-        # Step 1→2: also prefill character description with the concept
+        # Step 1→2: create project folder + prefill character description
         self.sb_step1_next.click(
-            fn=lambda concept: [*self._step_visibility(2), concept],
-            inputs=[self.sb_concept],
-            outputs=[*step_outputs, self.sb_char_description],
+            fn=self._enter_step2,
+            inputs=[self.sb_concept, self.sb_state],
+            outputs=[*step_outputs, self.sb_char_description, self.sb_state],
         )
         # sb_step2_next is wired in _wire_step2 (combines save + navigate)
         self.sb_step3_next.click(
@@ -577,20 +620,46 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             ],
         )
 
-        # Shot count → update GROUP visibility (the whole card, not just the textbox)
+        # Shot count → update GROUP visibility
         self.sb_shot_count.change(
             fn=self._update_shot_visibility,
             inputs=[self.sb_shot_count],
-            outputs=self.sb_shot_groups,  # Update the Group containers
+            outputs=self.sb_shot_groups,
         )
 
-        # Genre slider live pct update — wire each slider individually
+        # Genre slider live pct update
         for genre in ALL_GENRES:
             self.sb_genre_sliders[genre].change(
                 fn=self._update_genre_pcts,
                 inputs=genre_inputs,
                 outputs=[*genre_pct_outputs, self.sb_genre_zero_warn],
             )
+
+        # ── Recent Projects: show/hide import path ──
+        self.sb_recent_projects.change(
+            fn=self._on_project_dropdown_change,
+            inputs=[self.sb_recent_projects],
+            outputs=[self.sb_import_path],
+        )
+
+        # ── Resume button ──
+        step_outputs = [
+            self.step1_panel, self.step2_panel,
+            self.step3_panel, self.step4_panel,
+            self.sb_back_btn, self.sb_step_label,
+        ]
+        self.sb_resume_btn.click(
+            fn=self._resume_project,
+            inputs=[self.sb_recent_projects, self.sb_import_path],
+            outputs=[
+                self.sb_state,
+                self.sb_concept,
+                self.sb_shot_count,
+                self.sb_vibe,
+                self.sb_roll_status,
+                *step_outputs,
+            ],
+        )
 
     def _update_shot_visibility(self, shot_count):
         n = int(shot_count)
@@ -622,6 +691,64 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             f"<small style='color:var(--body-text-color-subdued)'>Advanced: {len(models)} models including finetunes.</small>"
         )
         return gr.update(choices=choices, value=best), hint
+
+    def _enter_step2(self, concept, sb_state):
+        """Step 1→2: create project folder if not yet created, save state."""
+        sb_state = dict(sb_state)
+        if not sb_state.get("project_dir"):
+            sb_state["project_dir"] = create_project_dir(concept)
+        sb_state["concept"] = concept
+        sb_state["current_step"] = 2
+        save_project(sb_state)
+        return [*self._step_visibility(2), concept, sb_state]
+
+    def _on_project_dropdown_change(self, selection):
+        """Show import path textbox when 'Import from folder...' is selected."""
+        if selection and "Import from folder" in selection:
+            return gr.update(visible=True)
+        return gr.update(visible=False)
+
+    def _resume_project(self, dropdown_selection, import_path):
+        """Load a project and jump to its saved step."""
+        project_dir = None
+
+        # Check if importing from folder
+        if dropdown_selection and "Import from folder" in dropdown_selection:
+            if import_path and os.path.isdir(import_path):
+                project_dir = import_path
+            else:
+                gr.Warning("Invalid folder path")
+                return [gr.update()] * 11  # sb_state + concept + shot_count + vibe + status + 6 step_outputs
+        else:
+            # Find the matching project from dropdown
+            if dropdown_selection and hasattr(self, '_recent_project_data'):
+                for i, p in enumerate(self._recent_project_data):
+                    label = f"📂 {p['concept'][:40]} (Step {p['step']}, {p['age_str']})"
+                    if label == dropdown_selection:
+                        project_dir = p["path"]
+                        break
+
+        if not project_dir:
+            gr.Warning("No project selected")
+            return [gr.update()] * 11
+
+        data = load_project(project_dir)
+        if not data:
+            gr.Warning("Could not load project")
+            return [gr.update()] * 11
+
+        step = data.get("current_step", 1)
+        step_vis = list(self._step_visibility(step))
+        gr.Info(f"📂 Resumed: {data.get('concept', 'Untitled')[:40]} at Step {step}")
+
+        return [
+            data,                                    # sb_state
+            data.get("concept", ""),                 # sb_concept
+            data.get("shot_count", 6),               # sb_shot_count
+            data.get("vibe", "cinematic"),            # sb_vibe
+            f"<span style='color:var(--primary-500)'>📂 Project loaded</span>",  # roll_status
+            *step_vis,                               # step panels + back btn + label
+        ]
 
     def _do_roll(self, concept, shot_count, video_model, image_model, *genre_sliders):
         shot_count = int(shot_count)
@@ -680,6 +807,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             f"<span style='color:var(--primary-500)'>✅ {shot_count} shots generated "
             f"<span style='opacity:0.6'>({source})</span></span>"
         )
+        save_project(state_dict)
         return [status_html, *beat_updates, *label_updates, state_dict]
 
     # ── Step 2 wiring ────────────────────────────────────────────────────────
@@ -1152,6 +1280,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             if success:
                 output_path = self._find_newest_output(since_ts=before_ts, output_type="image")
                 if output_path:
+                    # Copy to project folder
+                    project_dir = sb_state.get("project_dir", "")
+                    if project_dir:
+                        output_path = copy_to_project(output_path, project_dir, "images")
                     s["ref_image_path"] = output_path
                     s["status"] = STATUS_APPROVED if is_auto else STATUS_READY
                     rendered += 1
@@ -1160,6 +1292,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                     s["status"] = STATUS_PENDING
             else:
                 s["status"] = STATUS_PENDING
+
+            # Auto-save after each shot
+            save_project(sb_state)
 
             # Yield completed shot — only update this shot's badge/buttons/image
             yield _yield_state(
@@ -1181,6 +1316,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             shots[shot_index] = dict(shots[shot_index])
             shots[shot_index]["status"] = STATUS_APPROVED
         sb_state["shots"] = shots
+        save_project(sb_state)
         progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
         return [sb_state, progress, next_btn, *badges, *buttons]
 
@@ -1193,6 +1329,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             shots[shot_index]["status"] = STATUS_REJECTED
             shots[shot_index]["seed"] = random.randint(0, 999999)
         sb_state["shots"] = shots
+        save_project(sb_state)
         progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
         return [sb_state, progress, next_btn, *badges, *buttons]
 
@@ -1324,6 +1461,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
     def _enter_step4(self, sb_state):
         """Navigate to Step 4 and populate video cards."""
+        sb_state = dict(sb_state)
+        sb_state["current_step"] = 4
+        save_project(sb_state)
         step_updates = list(self._step_visibility(4))
         panel_updates = self._make_video_panel_updates(sb_state)
         return [*step_updates, *panel_updates]
@@ -1379,6 +1519,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             shots[shot_index] = dict(shots[shot_index])
             shots[shot_index]["video_status"] = STATUS_APPROVED
         sb_state["shots"] = shots
+        save_project(sb_state)
         shot_count = sb_state.get("shot_count", 6)
         approved = sum(1 for s in shots[:shot_count]
                        if s.get("video_status") == STATUS_APPROVED)
@@ -1405,6 +1546,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             shots[shot_index] = dict(shots[shot_index])
             shots[shot_index]["video_status"] = STATUS_REJECTED
         sb_state["shots"] = shots
+        save_project(sb_state)
         shot_count = sb_state.get("shot_count", 6)
         approved = sum(1 for s in shots[:shot_count]
                        if s.get("video_status") == STATUS_APPROVED)
@@ -1557,6 +1699,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             if success:
                 output_path = self._find_newest_output(since_ts=before_ts, output_type="video")
                 if output_path:
+                    # Copy to project folder
+                    project_dir = sb_state.get("project_dir", "")
+                    if project_dir:
+                        output_path = copy_to_project(output_path, project_dir, "videos")
                     s["video_path"] = output_path
                     s["video_status"] = V_APPROVED  # Auto-approve for now
                     rendered += 1
@@ -1565,6 +1711,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                     s["video_status"] = V_PENDING
             else:
                 s["video_status"] = V_PENDING
+
+            # Auto-save after each shot
+            save_project(sb_state)
 
             yield _yield_state(
                 f"<span style='color:var(--primary-400)'>✅ {rendered}/{len(to_render)} videos done...</span>",
@@ -1642,6 +1791,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             "shots": [],
             "shot_duration": 5.0,
             "current_step": 1,
+            "project_dir": "",
         }
 
     def _get_ollama_badge(self) -> str:
