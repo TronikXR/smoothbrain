@@ -913,6 +913,27 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         # Start from model defaults only — do NOT inherit primary_settings
         # from main UI (which may have wrong step count, resolution, etc.)
         base = dict(defaults)
+        # Explicitly zero out ref-mode params to prevent primary_settings
+        # leakage. validate_task() merges primary_settings FIRST, then our
+        # params, so any key we omit inherits from the last main-UI state.
+        # If the user previously used video_prompt_type="I" in the main UI,
+        # it would leak through and require image_refs, causing validation
+        # failure for tasks that have no reference images.
+        base.setdefault("video_prompt_type", "")
+        base.setdefault("image_prompt_type", "")
+        base.setdefault("audio_prompt_type", "")
+        base.setdefault("image_start", None)
+        base.setdefault("image_end", None)
+        base.setdefault("image_refs", None)
+        base.setdefault("video_source", None)
+        base.setdefault("video_guide", None)
+        base.setdefault("image_guide", None)
+        base.setdefault("audio_guide", None)
+        base.setdefault("audio_guide2", None)
+        base.setdefault("audio_source", None)
+        base.setdefault("custom_guide", None)
+        base.setdefault("video_mask", None)
+        base.setdefault("image_mask", None)
         # Apply Smooth Brain speed-lora overrides for image models
         sb_overrides = get_image_model_overrides(model_type)
         if sb_overrides:
