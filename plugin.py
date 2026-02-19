@@ -1358,7 +1358,18 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 "seed": s.get("seed", -1),
             }
             if char_ref:
-                extra["image_start"] = char_ref
+                # Wan/LTX/Hunyuan video models use image_start
+                # Qwen/Flux/Klein image models use image_refs array
+                model_lower = image_model.lower()
+                is_wan_family = any(model_lower.startswith(p) for p in
+                    ("wan", "i2v", "ti2v", "t2v", "ltx", "hunyuan", "hy_", "k5_"))
+                if is_wan_family:
+                    extra["image_start"] = char_ref
+                    extra["image_prompt_type"] = "S"
+                else:
+                    extra["image_refs"] = [char_ref]
+                    extra["video_prompt_type"] = "I"
+                    extra["image_prompt_type"] = ""
 
             task = self._build_task(prompt, image_model, extra)
             s["status"] = STATUS_RENDERING
