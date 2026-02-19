@@ -223,6 +223,61 @@ def _refine_prompts(
     return None
 
 
+def refine_single_prompt(
+    raw_prompt: str,
+    model_id: str,
+    purpose: str = "image",
+) -> str:
+    """Apply model-specific prompt guide to a single prompt at render time.
+
+    Args:
+        raw_prompt: The original prompt text.
+        model_id: The model id (e.g. 'flux_dev', 'wan21_t2v').
+        purpose: 'image' or 'video' — affects the system instruction.
+
+    Returns the refined prompt, or raw_prompt unchanged if Ollama is offline
+    or no guide exists for this model.
+    """
+    guide_text = format_guide_for_system_prompt(model_id)
+    if not guide_text:
+        print(f"  [prompt] No guide for {model_id}, using raw prompt")
+        return raw_prompt
+
+    if not is_online() or not HAS_HTTPX:
+        print(f"  [prompt] Ollama offline — using raw prompt for {purpose}")
+        return raw_prompt
+
+    system = (
+        f"You are a prompt optimization specialist. Rewrite the user's prompt to follow "
+        f"the syntax, keywords, and rules of the target {purpose} model.\n"
+        f"\n{guide_text}\n\n"
+        f"Rules:\n"
+        f"- Preserve the original creative intent completely.\n"
+        f"- Apply model-specific syntax rules from the guide above.\n"
+        f"- Do NOT add new scene elements — only optimize the language.\n"
+        f"- Keep the refined prompt under 150 words.\n"
+        f"- Respond with ONLY the refined prompt text, nothing else."
+    )
+
+    model_name = get_model_name()
+    try:
+        refined = _generate(
+            model_name, system,
+            f"Refine this {purpose} prompt:\n\n{raw_prompt}",
+            temperature=0.3, max_tokens=512,
+        ).strip()
+        if refined and len(refined) > 10:
+            print(f"  [prompt] Refined ({purpose}, {model_id}):")
+            print(f"    Original: {raw_prompt[:120]}...")
+            print(f"    Refined:  {refined[:120]}...")
+            return refined
+        print(f"  [prompt] Refinement too short, using raw prompt")
+    except Exception as e:
+        print(f"  [prompt] Refinement failed for {model_id}: {e}")
+
+    return raw_prompt
+
+
 def pack(
     concept: str = "",
     shot_count: int = 6,

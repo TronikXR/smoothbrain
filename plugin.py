@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import gradio as gr
 from shared.utils.plugins import WAN2GPPlugin
 
-from .ollama import pack as ollama_pack, get_status as ollama_status, is_online
+from .ollama import pack as ollama_pack, get_status as ollama_status, is_online, refine_single_prompt
 from .state import (
     SmoothBrainSession, ShotState,
     save_session, load_session, clear_session,
@@ -753,7 +753,11 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 "image_mode": 1,  # PNG output, not video
                 "seed": -1,
             }
-            task = self._build_task(description.strip(), image_model, extra)
+            # Refine prompt using the image model's guide
+            refined = refine_single_prompt(description.strip(), image_model, purpose="image")
+            print(f"[SmoothBrain] Character gen → model={image_model}")
+            print(f"  Prompt: {refined[:200]}")
+            task = self._build_task(refined, image_model, extra)
             before_ts = time.time()
             gr.Info("🎨 Generating character image... this may take a moment.")
             success = self._run_render_tasks([task])
@@ -953,9 +957,11 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             shots[i] = s
             status = s.get("status", STATUS_PENDING)
             if status in (STATUS_PENDING, STATUS_REJECTED):
-                prompt = s.get("image_prompt") or s.get("beat") or ""
-                if not prompt:
+                raw_prompt = s.get("image_prompt") or s.get("beat") or ""
+                if not raw_prompt:
                     continue
+                prompt = refine_single_prompt(raw_prompt, image_model, purpose="image")
+                print(f"[SmoothBrain] Shot {i+1} image → {prompt[:120]}")
                 extra = {
                     "resolution": res_str,
                     "image_mode": 1,  # PNG output
@@ -1146,9 +1152,11 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         task_shot_indices = []
         errors = []
         for i, s in enumerate(shots[:shot_count]):
-            prompt = s.get("video_prompt") or s.get("beat") or ""
-            if not prompt:
+            raw_prompt = s.get("video_prompt") or s.get("beat") or ""
+            if not raw_prompt:
                 continue
+            prompt = refine_single_prompt(raw_prompt, video_model, purpose="video")
+            print(f"[SmoothBrain] Shot {i+1} video → {prompt[:120]}")
             try:
                 shot_obj = ShotState(
                     beat=s.get("beat", ""),
