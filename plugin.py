@@ -979,18 +979,45 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         vibe = sb_state.get("vibe", "cinematic")
         shot_count = sb_state.get("shot_count", 6)
         is_auto = auto_mode == "Auto"
-        n_img = len(self.sb_storyboard_panels)  # for gr.update() padding
+        n_panels = len(self.sb_storyboard_panels)
 
-        def _yield_state(status_html, sb_state):
-            """Build a full output list for the generator yield."""
-            progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
+        def _yield_state(status_html, sb_state, changed_shot=None):
+            """Build output list — only update the shot that just changed."""
+            # Progress bar always updates
+            approved = sum(1 for s in shots[:shot_count]
+                           if s.get("status") == STATUS_APPROVED)
+            progress = self._progress_bar_html(approved, shot_count)
+            all_approved = approved == shot_count and shot_count > 0
+            next_btn = gr.update(interactive=all_approved)
+
+            # Badges: only update the changed shot
+            badges = []
+            for i in range(n_panels):
+                if changed_shot is not None and i == changed_shot:
+                    status = shots[i].get("status", STATUS_PENDING) if i < len(shots) else STATUS_PENDING
+                    badges.append(gr.update(value=self._shot_badge_html(i, status)))
+                else:
+                    badges.append(gr.update())
+
+            # Buttons: only update the changed shot
+            buttons = []
+            for i in range(n_panels):
+                if changed_shot is not None and i == changed_shot:
+                    status = shots[i].get("status", STATUS_PENDING) if i < len(shots) else STATUS_PENDING
+                    show = (status == STATUS_READY)
+                    buttons.extend([gr.update(visible=show), gr.update(visible=show)])
+                else:
+                    buttons.extend([gr.update(), gr.update()])
+
+            # Images: only update the changed shot
             img_updates = []
-            for i in range(n_img):
-                if i < len(shots):
-                    path = shots[i].get("ref_image_path")
+            for i in range(n_panels):
+                if changed_shot is not None and i == changed_shot:
+                    path = shots[i].get("ref_image_path") if i < len(shots) else None
                     img_updates.append(gr.update(value=path) if path else gr.update())
                 else:
                     img_updates.append(gr.update())
+
             return [
                 status_html,
                 sb_state, progress, next_btn, gr.update(),
@@ -1025,7 +1052,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         sb_state["resolution"] = resolution
         rendered = 0
 
-        # Yield initial progress
+        # Yield initial progress (no specific shot changed)
         yield _yield_state(
             f"<span style='color:var(--primary-400)'>⏳ Rendering 0/{len(to_render)} shots...</span>",
             sb_state,
@@ -1048,12 +1075,12 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             task = self._build_task(prompt, image_model, extra)
             s["status"] = STATUS_RENDERING
 
-            # Yield rendering status
+            # Yield rendering status — update only this shot's badge
             yield _yield_state(
                 f"<span style='color:var(--primary-400)'>"
                 f"🎨 <b>Rendering shot {shot_i+1}</b> ({task_idx+1}/{len(to_render)})..."
                 f"<br><small>Check terminal for live progress.</small></span>",
-                sb_state,
+                sb_state, changed_shot=shot_i,
             )
 
             before_ts = time.time()
@@ -1075,13 +1102,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             else:
                 s["status"] = STATUS_PENDING
 
-            # Yield updated UI with image
+            # Yield completed shot — only update this shot's badge/buttons/image
             yield _yield_state(
                 f"<span style='color:var(--primary-400)'>✅ {rendered}/{len(to_render)} shots done...</span>",
-                sb_state,
+                sb_state, changed_shot=shot_i,
             )
 
-        # Final status
+        # Final status (no shot changed — just update text)
         if rendered > 0:
             status = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(to_render)} shot image(s) generated!</span>"
         else:
