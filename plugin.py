@@ -469,7 +469,12 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             self.step3_panel, self.step4_panel,
             self.sb_back_btn, self.sb_step_label,
         ]
-        self.sb_step1_next.click(fn=lambda: self._step_visibility(2), inputs=[], outputs=step_outputs)
+        # Step 1→2: also prefill character description with the concept
+        self.sb_step1_next.click(
+            fn=lambda concept: [*self._step_visibility(2), concept],
+            inputs=[self.sb_concept],
+            outputs=[*step_outputs, self.sb_char_description],
+        )
         # sb_step2_next is wired in _wire_step2 (combines save + navigate)
         self.sb_step3_next.click(fn=lambda: self._step_visibility(4), inputs=[], outputs=step_outputs)
         self.sb_back_btn.click(fn=self._go_back, inputs=[self.sb_state], outputs=step_outputs)
