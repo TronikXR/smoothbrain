@@ -101,17 +101,33 @@ IMAGE_MODEL_OVERRIDES = {
         ],
         "loras_multipliers": "1|",
     },
+    # pi-FLUX.2 Dev 32B — naturally 4-step, no loras needed
+    "pi_flux2": {
+        "num_inference_steps": 4,
+        "guidance_scale": 5,
+        "flow_shift": 5,
+        "sample_solver": "",
+        "image_mode": 1,
+        "video_prompt_type": "I",
+        "image_prompt_type": "",
+        "embedded_guidance_scale": 4,
+        "remove_background_images_ref": 0,
+        "image_refs_relative_size": 50,
+    },
 }
 
 
 def get_image_model_overrides(model_id: str) -> dict:
     """Return Smooth Brain speed-lora overrides for an image model, or {}.
-    Falls back to prefix matching for future qwen_image_* variants."""
+    Falls back to prefix matching for future qwen_image_* / pi_flux* variants."""
     if model_id in IMAGE_MODEL_OVERRIDES:
         return dict(IMAGE_MODEL_OVERRIDES[model_id])
     # Fallback: any qwen_image model gets the base qwen_image_20B overrides
     if model_id.startswith("qwen_image"):
         return dict(IMAGE_MODEL_OVERRIDES.get("qwen_image_20B", {}))
+    # Fallback: any pi_flux model gets the base pi_flux2 overrides
+    if model_id.startswith("pi_flux"):
+        return dict(IMAGE_MODEL_OVERRIDES.get("pi_flux2", {}))
     return {}
 
 
