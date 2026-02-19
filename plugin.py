@@ -913,27 +913,26 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         # Start from model defaults only — do NOT inherit primary_settings
         # from main UI (which may have wrong step count, resolution, etc.)
         base = dict(defaults)
-        # Explicitly zero out ref-mode params to prevent primary_settings
-        # leakage. validate_task() merges primary_settings FIRST, then our
-        # params, so any key we omit inherits from the last main-UI state.
-        # If the user previously used video_prompt_type="I" in the main UI,
-        # it would leak through and require image_refs, causing validation
-        # failure for tasks that have no reference images.
-        base.setdefault("video_prompt_type", "")
-        base.setdefault("image_prompt_type", "")
-        base.setdefault("audio_prompt_type", "")
-        base.setdefault("image_start", None)
-        base.setdefault("image_end", None)
-        base.setdefault("image_refs", None)
-        base.setdefault("video_source", None)
-        base.setdefault("video_guide", None)
-        base.setdefault("image_guide", None)
-        base.setdefault("audio_guide", None)
-        base.setdefault("audio_guide2", None)
-        base.setdefault("audio_source", None)
-        base.setdefault("custom_guide", None)
-        base.setdefault("video_mask", None)
-        base.setdefault("image_mask", None)
+        # Force-zero all ref-mode params. These MUST be explicitly cleared
+        # because: (1) model defaults may already contain non-empty values,
+        # and (2) validate_task() merges primary_settings FIRST then our
+        # params, so any ref-mode field we don't set leaks from the main UI.
+        # extra_params can re-set these when refs actually exist.
+        base["video_prompt_type"] = ""
+        base["image_prompt_type"] = ""
+        base["audio_prompt_type"] = ""
+        base["image_start"] = None
+        base["image_end"] = None
+        base["image_refs"] = None
+        base["video_source"] = None
+        base["video_guide"] = None
+        base["image_guide"] = None
+        base["audio_guide"] = None
+        base["audio_guide2"] = None
+        base["audio_source"] = None
+        base["custom_guide"] = None
+        base["video_mask"] = None
+        base["image_mask"] = None
         # Apply Smooth Brain speed-lora overrides for image models
         sb_overrides = get_image_model_overrides(model_type)
         if sb_overrides:
@@ -944,6 +943,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         base["model_type"] = model_type
         base["base_model_type"] = model_type
         base.setdefault("mode", "")
+        # Debug: log key params for validation troubleshooting
+        print(f"  [_build_task] model={model_type} vpt={base.get('video_prompt_type')!r} "
+              f"ipt={base.get('image_prompt_type')!r} apt={base.get('audio_prompt_type')!r} "
+              f"refs={base.get('image_refs')!r} istart={base.get('image_start') is not None}")
         return {"id": task_id or int(time.time() * 1000), "params": base, "plugin_data": {}}
 
     def _find_newest_output(self, extensions=None, since_ts=None, output_type="image"):
