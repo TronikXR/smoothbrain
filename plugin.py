@@ -72,6 +72,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         self._video_models: List[dict] = []
         self._image_models: List[dict] = []
         self._gpu_info: dict = {"name": "Unknown", "vram_mb": 0}
+        self._render_cancelled = False
 
     # ── Plugin registration ──────────────────────────────────────────────────
 
@@ -469,6 +470,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             self.sb_gen_images_btn_bottom = gr.Button(
                 "🖼 Re-generate Rejected", variant="secondary", scale=2,
             )
+            self.sb_stop_render_btn = gr.Button(
+                "🛑 Stop Render", variant="stop", scale=1, visible=False,
+            )
         with gr.Row():
             self.sb_step3_next = gr.Button(
                 "✅ Approve All & Continue →", variant="primary", interactive=False,
@@ -554,6 +558,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         with gr.Row():
             self.sb_export_btn_bottom = gr.Button(
                 "🎬 Re-render Rejected", variant="secondary", scale=2,
+            )
+            self.sb_stop_video_btn = gr.Button(
+                "🛑 Stop Render", variant="stop", scale=1, visible=False,
             )
 
         # Remove old progress markdown — replaced by cards
@@ -902,8 +909,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             defaults = self.get_default_settings(model_type)
         except Exception:
             defaults = {}
-        base = self.primary_settings.copy() if hasattr(self, 'primary_settings') and self.primary_settings else {}
-        base.update(defaults)
+        # Start from model defaults only — do NOT inherit primary_settings
+        # from main UI (which may have wrong step count, resolution, etc.)
+        base = dict(defaults)
         if extra_params:
             base.update(extra_params)
         base["prompt"] = prompt
@@ -1097,6 +1105,12 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             fn=self._queue_image_renders,
             inputs=[self.state, self.sb_state, self.sb_resolution, self.sb_auto_mode],
             outputs=gen_outputs,
+        )
+        # Stop render button
+        self.sb_stop_render_btn.click(
+            fn=self._stop_render,
+            inputs=[],
+            outputs=[self.sb_stop_render_btn],
         )
 
         # Per-shot approve/reject buttons
@@ -1308,6 +1322,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
         sb_state["resolution"] = resolution
         rendered = 0
+        self._render_cancelled = False
 
         # Yield initial progress (no specific shot changed)
         yield _yield_state(
@@ -1316,6 +1331,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         )
 
         for task_idx, shot_i in enumerate(to_render):
+            # Check for cancellation
+            if self._render_cancelled:
+                yield _yield_state(
+                    f"<span style='color:orange'>🛑 Render stopped. {rendered}/{len(to_render)} shots completed.</span>",
+                    sb_state,
+                )
+                return
             s = shots[shot_i]
             raw_prompt = s.get("image_prompt") or s.get("beat") or ""
             # Prepend character description from vision scan for consistency
@@ -1393,6 +1415,12 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         save_project(sb_state)
         progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
         return [sb_state, progress, next_btn, *badges, *buttons]
+
+    def _stop_render(self):
+        """Signal the running generator to stop after the current shot."""
+        self._render_cancelled = True
+        print("[SmoothBrain] 🛑 Render cancellation requested")
+        return gr.update(visible=False)
 
     def _reject_shot(self, sb_state, shot_index):
         import random
@@ -1502,6 +1530,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                     *self._all_vid_button_outputs(),
                 ],
             )
+
+        # Stop video render button
+        self.sb_stop_video_btn.click(
+            fn=self._stop_render,
+            inputs=[],
+            outputs=[self.sb_stop_video_btn],
+        )
 
         # New project
         self.sb_new_project_btn.click(
@@ -1762,6 +1797,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             return
 
         rendered = 0
+        self._render_cancelled = False
 
         # Yield initial
         yield _yield_state(
@@ -1770,6 +1806,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         )
 
         for task_idx, (shot_i, prompt, params) in enumerate(to_render):
+            # Check for cancellation
+            if self._render_cancelled:
+                yield _yield_state(
+                    f"<span style='color:orange'>🛑 Render stopped. {rendered}/{len(to_render)} videos completed.</span>",
+                    sb_state,
+                )
+                return
             s = shots[shot_i]
             s["video_status"] = V_RENDERING
             # Store the refined prompt for display
