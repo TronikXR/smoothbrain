@@ -31,6 +31,7 @@ from .story_templates import ALL_GENRES
 from .model_scanner import (
     scan_video_models, scan_image_models,
     get_best_video_model, get_best_image_model, scan_profiles,
+    get_image_model_overrides,
 )
 from .gpu_utils import (
     get_gpu_info, smart_duration_limits,
@@ -912,6 +913,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         # Start from model defaults only — do NOT inherit primary_settings
         # from main UI (which may have wrong step count, resolution, etc.)
         base = dict(defaults)
+        # Apply Smooth Brain speed-lora overrides for image models
+        sb_overrides = get_image_model_overrides(model_type)
+        if sb_overrides:
+            base.update(sb_overrides)
         if extra_params:
             base.update(extra_params)
         base["prompt"] = prompt

@@ -25,6 +25,50 @@ I2V_ARCH_FAMILIES = ["ltx2_19B", "ltxv_13B", "ltx2_distilled"]
 IMAGE_ARCH_PREFIXES = ["flux", "qwen_image"]
 IMAGE_MODEL_EXCLUDE = ["qwen_image_layered"]
 
+# ── Image model overrides for Smooth Brain ──────────────────────────────────
+# Speed-lora optimized settings per image model. These override wan2gp's
+# defaults when rendering storyboard images via Smooth Brain.
+IMAGE_MODEL_OVERRIDES = {
+    # Qwen Image Edit 20B — Lightning 4-step accelerator
+    "qwen_image_edit_20B": {
+        "num_inference_steps": 4,
+        "guidance_scale": 1,
+        "flow_shift": 5,
+        "sample_solver": "default",
+        "image_mode": 1,
+        "video_prompt_type": "I",
+        "image_prompt_type": "",
+        "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
+        "activated_loras": [
+            "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
+            "loras_accelerators/Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors"
+        ],
+        "loras_multipliers": "1|",
+    },
+    # Qwen Image 20B — same Lightning accelerator
+    "qwen_image_20B": {
+        "num_inference_steps": 4,
+        "guidance_scale": 1,
+        "flow_shift": 5,
+        "sample_solver": "default",
+        "image_mode": 1,
+        "video_prompt_type": "I",
+        "image_prompt_type": "",
+        "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
+        "activated_loras": [
+            "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
+            "loras_accelerators/Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors"
+        ],
+        "loras_multipliers": "1|",
+    },
+}
+
+
+def get_image_model_overrides(model_id: str) -> dict:
+    """Return Smooth Brain speed-lora overrides for an image model, or {}."""
+    return dict(IMAGE_MODEL_OVERRIDES.get(model_id, {}))
+
+
 # Priority order for auto-selecting the best video model
 VIDEO_PRIORITY = [
     "ltx2_distilled",
@@ -55,6 +99,35 @@ def _is_i2v(arch: str, model_id: str) -> bool:
     return False
 
 
+def _resolve_model_urls(model_data: dict, defaults_dir: str) -> list[str]:
+    """Resolve model URLs, following string references to base model defs."""
+    urls = model_data.get("model", {}).get("URLs", [])
+    if isinstance(urls, str):
+        # String reference to another model definition (e.g. "i2v")
+        ref_path = os.path.join(defaults_dir, urls + ".json")
+        if os.path.isfile(ref_path):
+            try:
+                with open(ref_path, encoding="utf-8") as f:
+                    ref_data = json.load(f)
+                urls = ref_data.get("model", {}).get("URLs", [])
+            except Exception:
+                urls = []
+        else:
+            urls = []
+    if not isinstance(urls, list):
+        urls = []
+    return urls
+
+
+def _is_installed(urls: list[str], ckpts_dir: str) -> bool:
+    """Check if at least one model file from the URLs exists in ckpts/."""
+    return any(
+        os.path.isfile(os.path.join(ckpts_dir, url.split("/")[-1]))
+        for url in urls
+        if url
+    )
+
+
 def _scan_folder(folder: str, source: str) -> list[dict]:
     """Scan a defaults/ or finetunes/ folder for video model JSONs."""
     if not os.path.isdir(folder):
@@ -83,6 +156,7 @@ def _scan_folder(folder: str, source: str) -> list[dict]:
                 "source": source,
                 "isI2V": _is_i2v(arch, model_id),
                 "description": mb.get("description", ""),
+                "_data": data,  # keep raw data for URL resolution
             })
         except Exception:
             continue
@@ -91,22 +165,35 @@ def _scan_folder(folder: str, source: str) -> list[dict]:
 
 def scan_video_models(simple: bool = True) -> list[dict]:
     """
-    Return I2V-capable video models installed in Wan2GP.
+    Return I2V-capable video models that are actually installed in Wan2GP.
     simple=True → only well-known default I2V model IDs (matches TronikSlate Simple mode).
     simple=False → all I2V models including finetunes.
+    Filters to models whose ckpt files actually exist on disk.
     """
     defaults_dir = os.path.join(WAN2GP_APP, "defaults")
     finetunes_dir = os.path.join(WAN2GP_APP, "finetunes")
+    ckpts_dir = os.path.join(WAN2GP_APP, "ckpts")
     all_models = _scan_folder(defaults_dir, "default") + _scan_folder(finetunes_dir, "finetune")
     i2v_models = [m for m in all_models if m["isI2V"]]
+
+    # Filter to installed models only
+    installed = []
+    for m in i2v_models:
+        urls = _resolve_model_urls(m.get("_data", {}), defaults_dir)
+        if _is_installed(urls, ckpts_dir):
+            # Remove internal _data before returning
+            result = {k: v for k, v in m.items() if k != "_data"}
+            installed.append(result)
+
     if simple:
         return [
-            m for m in i2v_models
+            m for m in installed
             if m["source"] == "default" and (
                 m["id"] in SIMPLE_I2V_IDS or m["architecture"] in SIMPLE_I2V_IDS
             )
         ]
-    return i2v_models
+    return installed
+
 
 
 def get_best_video_model(models: list[dict]) -> str:
