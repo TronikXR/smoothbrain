@@ -194,6 +194,61 @@ FLUX1_GUIDE = ModelPromptGuide(
     ),
 )
 
+# ── Qwen Image Guide ─────────────────────────────────────────────────────────
+QWEN_IMAGE_GUIDE = ModelPromptGuide(
+    model_name="Qwen Image Edit / Qwen Image 2512",
+    syntax_rules=(
+        "USE natural-language sentences — describe everything one at a time as "
+        "instructional commands or static descriptions.\n"
+        "When using multiple reference images, explicitly write 'image 1', "
+        "'image 2', or 'image 3' to link subjects to references "
+        "(e.g. 'The woman from image 1 holds the bag from image 2').\n"
+        "Describe the scene as a STATIC description or a direct edit command "
+        "(e.g. 'Change the background to…', 'The woman from image 1 is wearing…').\n"
+        "When using the Next Scene LoRA, the prompt MUST begin with 'next scene'.\n"
+        "Match output resolution to input image resolution for best editing results."
+    ),
+    keywords=(
+        "CAMERA/ANGLE: front view, back view, side view, switch perspective to the front\n"
+        "VISUAL STYLE: pixel art, cartoon style, Pixar style, 3D render, anime-inspired style, "
+        "Ghibli style, professional technical sketch, photorealistic, cinematic style, "
+        "watercolor painting, Lego\n"
+        "LIGHTING: warm light coming through the window, natural color grading, studio setup\n"
+        "COMPOSITION: close-up portrait, shallow depth of field, blank background\n"
+        "IDENTITY: preserve the facial features, keep the identity unchanged, "
+        "natural wrinkles, no plastic skin"
+    ),
+    negative_prompt=(
+        "Qwen supports negative prompts. Common negative terms: "
+        "'low quality, pixelated, blurry, deformed limbs'."
+    ),
+    pitfalls=(
+        "ALWAYS include identity preservation phrases ('preserve the facial features', "
+        "'keep the identity of the woman unchanged') — omitting them causes faces to "
+        "shift from realistic to animated styles.\n"
+        "At lower step counts (e.g. 4-step Lightning LoRA) or incorrect resolutions, "
+        "results tend toward over-smoothed 'plastic skin' or CGI look — add "
+        "'natural wrinkles', 'no plastic skin', 'photorealistic' to counteract.\n"
+        "Struggles to isolate the correct subject when multiple identical-looking "
+        "subjects are positioned very close together.\n"
+        "Text rendering occasionally misspells non-standard words."
+    ),
+    examples=(
+        "BASIC: 'a cat walking through a garden'\n"
+        "ENHANCED: 'Change image 1 to a realistic photograph of a cat walking through "
+        "a garden. Shallow depth of field, warm light coming through the trees, "
+        "natural color grading, photorealistic, no plastic skin.'\n\n"
+        "BASIC: 'make the girl wear the shirt and stand on the beach'\n"
+        "ENHANCED: 'The woman from image 1 is wearing the shirt from image 2. Change "
+        "the background to the beach and blend the lighting so it looks natural. Keep "
+        "the identity of the woman unchanged and preserve her facial features.'\n\n"
+        "BASIC: 'an old woman'\n"
+        "ENHANCED: 'Close-up portrait of a 72-year-old woman, natural wrinkles, silver "
+        "gray hair pulled loosely, warm light coming through the window, shallow depth "
+        "of field, natural color grading, photorealistic, no plastic skin.'"
+    ),
+)
+
 # ── Registry ──────────────────────────────────────────────────────────────────
 MODEL_GUIDES: Dict[str, ModelPromptGuide] = {
     # Wan 2.1 variants
@@ -218,10 +273,14 @@ MODEL_GUIDES: Dict[str, ModelPromptGuide] = {
     "flux2_dev": FLUX2_GUIDE,
     "flux2_klein_4b": FLUX2_GUIDE,
     "flux2_klein_9b": FLUX2_GUIDE,
+    # pi-FLUX.2 family (FLUX-based architecture)
+    "pi_flux2": FLUX2_GUIDE,
     # FLUX.1 family
     "flux": FLUX1_GUIDE,
     "flux_schnell": FLUX1_GUIDE,
     "flux_dev_kontext": FLUX1_GUIDE,
+    # Qwen Image family
+    "qwen_image": QWEN_IMAGE_GUIDE,
 }
 
 
