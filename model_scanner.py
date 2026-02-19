@@ -36,10 +36,6 @@ IMAGE_MODEL_OVERRIDES = {
         "flow_shift": 5,
         "sample_solver": "default",
         "image_mode": 1,
-        "video_prompt_type": "I",
-        "image_prompt_type": "",
-        "remove_background_images_ref": 1,
-        "image_refs_relative_size": 50,
         "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
         "activated_loras": [
             "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
@@ -54,50 +50,38 @@ IMAGE_MODEL_OVERRIDES = {
         "flow_shift": 5,
         "sample_solver": "default",
         "image_mode": 1,
-        "video_prompt_type": "I",
-        "image_prompt_type": "",
-        "remove_background_images_ref": 1,
-        "image_refs_relative_size": 50,
-        "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
+        "lset_name": "qwen\\Lightning Qwen v1.0 - 4 Steps.json",
         "activated_loras": [
             "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
             "loras_accelerators/Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors"
         ],
         "loras_multipliers": "1|",
     },
-    # Qwen Image 2512 20B (newer version) — same speed lora
+    # Qwen Image 2512 20B (newer version) — uses 2511 Lightning lora
     "qwen_image_2512_20B": {
         "num_inference_steps": 4,
         "guidance_scale": 1,
         "flow_shift": 5,
         "sample_solver": "default",
         "image_mode": 1,
-        "video_prompt_type": "I",
-        "image_prompt_type": "",
-        "remove_background_images_ref": 1,
-        "image_refs_relative_size": 50,
-        "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
+        "lset_name": "qwen\\Lightning Qwen Edit 2511 - 4 Steps.json",
         "activated_loras": [
             "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
-            "loras_accelerators/Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors"
+            "loras_accelerators/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
         ],
         "loras_multipliers": "1|",
     },
-    # Qwen Image Edit Plus 20B — same speed lora
+    # Qwen Image Edit Plus 20B (2509) — uses 2511 Lightning lora
     "qwen_image_edit_plus_20B": {
         "num_inference_steps": 4,
         "guidance_scale": 1,
         "flow_shift": 5,
         "sample_solver": "default",
         "image_mode": 1,
-        "video_prompt_type": "I",
-        "image_prompt_type": "",
-        "remove_background_images_ref": 1,
-        "image_refs_relative_size": 50,
-        "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
+        "lset_name": "qwen\\Lightning Qwen Edit 2511 - 4 Steps.json",
         "activated_loras": [
             "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
-            "loras_accelerators/Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors"
+            "loras_accelerators/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
         ],
         "loras_multipliers": "1|",
     },
@@ -108,9 +92,28 @@ IMAGE_MODEL_OVERRIDES = {
         "flow_shift": 5,
         "sample_solver": "",
         "image_mode": 1,
+        "embedded_guidance_scale": 4,
+    },
+}
+
+# Reference-mode overrides applied ONLY when image_refs are provided.
+# These cause validation failure if set without actual image refs.
+IMAGE_REF_OVERRIDES = {
+    "qwen_image": {  # prefix match for all Qwen models
         "video_prompt_type": "I",
         "image_prompt_type": "",
-        "embedded_guidance_scale": 4,
+        "remove_background_images_ref": 1,
+        "image_refs_relative_size": 50,
+    },
+    "pi_flux": {  # prefix match for pi-FLUX models
+        "video_prompt_type": "I",
+        "image_prompt_type": "",
+        "remove_background_images_ref": 0,
+        "image_refs_relative_size": 50,
+    },
+    "flux": {  # prefix match for Flux/Klein models
+        "video_prompt_type": "I",
+        "image_prompt_type": "",
         "remove_background_images_ref": 0,
         "image_refs_relative_size": 50,
     },
@@ -128,6 +131,14 @@ def get_image_model_overrides(model_id: str) -> dict:
     # Fallback: any pi_flux model gets the base pi_flux2 overrides
     if model_id.startswith("pi_flux"):
         return dict(IMAGE_MODEL_OVERRIDES.get("pi_flux2", {}))
+    return {}
+
+
+def get_image_ref_overrides(model_id: str) -> dict:
+    """Return reference-image-handling overrides for a model (only when refs exist)."""
+    for prefix, overrides in IMAGE_REF_OVERRIDES.items():
+        if model_id.startswith(prefix):
+            return dict(overrides)
     return {}
 
 

@@ -31,7 +31,7 @@ from .story_templates import ALL_GENRES
 from .model_scanner import (
     scan_video_models, scan_image_models,
     get_best_video_model, get_best_image_model, scan_profiles,
-    get_image_model_overrides,
+    get_image_model_overrides, get_image_ref_overrides,
 )
 from .gpu_utils import (
     get_gpu_info, smart_duration_limits,
@@ -1377,8 +1377,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                     extra["image_prompt_type"] = "S"
                 else:
                     extra["image_refs"] = [char_ref]
-                    extra["video_prompt_type"] = "I"
-                    extra["image_prompt_type"] = ""
+                    # Apply model-specific ref-mode overrides
+                    ref_overrides = get_image_ref_overrides(image_model)
+                    extra.update(ref_overrides)
 
             task = self._build_task(prompt, image_model, extra)
             s["status"] = STATUS_RENDERING
