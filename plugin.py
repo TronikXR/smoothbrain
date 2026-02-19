@@ -1283,7 +1283,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             """Build yield tuple for the generator, updating relevant outputs."""
             shots = sb_state.get("shots", [])
             shot_count = sb_state.get("shot_count", 0)
-            n_panels = N_SHOT_PANELS
+            n_panels = len(self.sb_storyboard_panels)
 
             # Progress bar
             approved = sum(1 for s in shots[:shot_count]
