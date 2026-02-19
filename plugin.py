@@ -1236,7 +1236,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         return f"<small>{duration}s{note}{gpu_note}</small>"
 
     def _export_videos(self, wan2gp_state, sb_state, shot_duration):
-        """Render all video shots in-process (no tab switching)."""
+        """Generator: render video shots one at a time with progress."""
         shots = sb_state.get("shots", [])
         video_model = sb_state.get("video_model", "")
         vibe = sb_state.get("vibe", "cinematic")
@@ -1244,13 +1244,14 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         resolution = sb_state.get("resolution", "480p")
 
         if not shots:
-            return "<span style='color:red'>No shots found. Go back to Step 1.</span>", ""
+            yield "<span style='color:red'>No shots found. Go back to Step 1.</span>", ""
+            return
         if not video_model:
-            return "<span style='color:red'>No video model selected. Go back to Step 1.</span>", ""
+            yield "<span style='color:red'>No video model selected. Go back to Step 1.</span>", ""
+            return
 
-        # Build video render tasks
-        tasks = []
-        task_shot_indices = []
+        # Build list of shots to render
+        to_render = []  # (shot_index, task_params)
         errors = []
         for i, s in enumerate(shots[:shot_count]):
             raw_prompt = s.get("video_prompt") or s.get("beat") or ""
@@ -1273,67 +1274,71 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 params = build_video_params(shot_obj, video_model, shot_duration, vibe, defaults)
                 res_str = VIDEO_RESOLUTION.get(vibe, {}).get(resolution, "832x480")
                 params["resolution"] = res_str
-                # Attach shot ref image for i2v if available
                 ref_path = s.get("ref_image_path")
                 if ref_path and os.path.exists(ref_path):
                     params["image_start"] = ref_path
-                task = self._build_task(prompt, video_model, params)
-                tasks.append(task)
-                task_shot_indices.append(i)
+                to_render.append((i, prompt, params))
             except Exception as e:
                 errors.append(f"Shot {i+1}: {e}")
 
-        if not tasks:
+        if not to_render:
             err_msg = "; ".join(errors) if errors else "No shots with prompts"
-            return f"<span style='color:red'>❌ {err_msg}</span>", ""
+            yield f"<span style='color:red'>❌ {err_msg}</span>", ""
+            return
 
-        # Run all video tasks in-process
-        gr.Info(f"🎬 Rendering {len(tasks)} video(s)... this will take a while.")
-        before_ts = time.time()
-        try:
-            success = self._run_render_tasks(tasks)
-        except Exception as e:
-            traceback.print_exc()
-            success = False
-
-        # Scan outputs for generated videos and assign to shots
-        cfg = self.server_config if hasattr(self, 'server_config') and self.server_config else {}
-        out_dir = cfg.get("save_path", "outputs")
-        if not os.path.isabs(out_dir):
-            wgp_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            out_dir = os.path.join(wgp_dir, out_dir)
-        recent = []
-        if os.path.isdir(out_dir):
-            recent.extend(glob.glob(os.path.join(out_dir, "*.mp4")))
-            recent = [f for f in recent if os.path.getmtime(f) >= before_ts]
-            recent.sort(key=os.path.getmtime)
+        # Yield initial status
+        yield (
+            f"<span style='color:var(--primary-400)'>⏳ Rendering 0/{len(to_render)} videos...</span>",
+            "",
+        )
 
         rendered = 0
-        video_paths = []
-        for idx, shot_i in enumerate(task_shot_indices):
-            if idx < len(recent):
-                shots[shot_i]["video_path"] = recent[idx]
-                video_paths.append(recent[idx])
-                rendered += 1
-
         progress_lines = []
-        for idx, shot_i in enumerate(task_shot_indices):
-            shot = shots[shot_i]
-            beat_preview = (shot.get('beat', '') or '')[:60]
-            if idx < len(recent):
-                progress_lines.append(f"✅ **Shot {shot_i+1}**: {beat_preview}")
+
+        for task_idx, (shot_i, prompt, params) in enumerate(to_render):
+            beat_preview = (shots[shot_i].get('beat', '') or '')[:60]
+
+            # Yield "rendering" status
+            yield (
+                f"<span style='color:var(--primary-400)'>"
+                f"🎬 <b>Rendering shot {shot_i+1}</b> ({task_idx+1}/{len(to_render)})..."
+                f"<br><small>Check terminal for live progress.</small></span>",
+                "\n".join(progress_lines) if progress_lines else "*Starting...*",
+            )
+
+            task = self._build_task(prompt, video_model, params)
+            before_ts = time.time()
+            try:
+                success = self._run_render_tasks([task])
+            except Exception as e:
+                traceback.print_exc()
+                success = False
+
+            if success:
+                output_path = self._find_newest_output(since_ts=before_ts, output_type="video")
+                if output_path:
+                    shots[shot_i]["video_path"] = output_path
+                    rendered += 1
+                    progress_lines.append(f"✅ **Shot {shot_i+1}**: {beat_preview}")
+                else:
+                    progress_lines.append(f"❌ **Shot {shot_i+1}**: {beat_preview} — no output")
             else:
-                progress_lines.append(f"❌ **Shot {shot_i+1}**: {beat_preview} — no output")
+                progress_lines.append(f"❌ **Shot {shot_i+1}**: {beat_preview} — render failed")
+
+            # Yield after each shot completes
+            yield (
+                f"<span style='color:var(--primary-400)'>✅ {rendered}/{len(to_render)} videos done...</span>",
+                "\n".join(progress_lines),
+            )
 
         if errors:
             progress_lines.extend([f"⚠️ {e}" for e in errors])
 
         if rendered > 0:
-            status = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(tasks)} video(s) rendered!</span>"
+            status = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(to_render)} video(s) rendered!</span>"
         else:
             status = "<span style='color:red'>❌ No videos generated. Check terminal for errors.</span>"
-
-        return status, "\n".join(progress_lines)
+        yield status, "\n".join(progress_lines)
 
     def _new_project(self):
         clear_session()
