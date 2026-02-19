@@ -22,8 +22,8 @@ NON_VIDEO_PREFIXES = [
 I2V_ARCH_PATTERNS = ["i2v", "ti2v"]
 # LTX models support I2V natively even without i2v in arch name
 I2V_ARCH_FAMILIES = ["ltx2_19B", "ltxv_13B", "ltx2_distilled"]
-IMAGE_ARCH_PREFIXES = ["flux", "qwen_image"]
-IMAGE_MODEL_EXCLUDE = ["qwen_image_layered"]
+IMAGE_ARCH_PREFIXES = ["flux", "qwen_image", "pi_flux"]
+IMAGE_MODEL_EXCLUDE = ["qwen_image_layered", "flux2_dev", "flux2_dev_nvfp4"]
 
 # ── Image model overrides for Smooth Brain ──────────────────────────────────
 # Speed-lora optimized settings per image model. These override wan2gp's
