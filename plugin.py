@@ -375,6 +375,14 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             "👍 **Approve** shots you like · 👎 **Reject** to re-generate them · All must be approved to continue."
         )
 
+        # ── LTX skip button (visible only when LTX model selected) ──
+        self.sb_skip_storyboard_btn = gr.Button(
+            "⚡ Skip Storyboard — Use T2V Mode",
+            variant="secondary",
+            visible=False,
+        )
+        self.sb_ltx_skip_info = gr.HTML("", visible=False)
+
         # ── Controls row: Manual/Auto toggle + Resolution picker ──
         with gr.Row():
             self.sb_auto_mode = gr.Radio(
@@ -853,7 +861,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         self.sb_step2_next.click(
             fn=self._save_characters_and_advance,
             inputs=[self.sb_state, self.sb_char_image],
-            outputs=[self.sb_state, *self._storyboard_panel_outputs(), *step_outputs],
+            outputs=[
+                self.sb_state,
+                *self._storyboard_panel_outputs(),
+                *step_outputs,
+                self.sb_skip_storyboard_btn,
+                self.sb_ltx_skip_info,
+            ],
         )
 
     # ── Headless render helpers ────────────────────────────────────────────
@@ -1024,7 +1038,19 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         char_choices = ["None"] + [n for n in char_names if n]
         panel_updates = self._make_storyboard_updates(shots, shot_count, char_choices)
         step_updates = list(self._step_visibility(3))
-        return [state_dict, *panel_updates, *step_updates]
+        # Show LTX skip button if video model is LTX
+        video_model = state_dict.get("video_model", "")
+        is_ltx = is_ltx_model(video_model)
+        skip_btn = gr.update(visible=is_ltx)
+        skip_info = gr.update(
+            visible=is_ltx,
+            value=(
+                "<span style='color:var(--primary-400);font-size:12px'>"
+                "⚡ LTX models support text-to-video — skip storyboard images and go straight to video generation."
+                "</span>"
+            ) if is_ltx else "",
+        )
+        return [state_dict, *panel_updates, *step_updates, skip_btn, skip_info]
 
     # ── Step 3 wiring ────────────────────────────────────────────────────────
 
@@ -1083,6 +1109,18 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                     *self._all_button_outputs(),
                 ],
             )
+
+        # LTX skip storyboard button
+        step_outputs = [
+            self.step1_panel, self.step2_panel,
+            self.step3_panel, self.step4_panel,
+            self.sb_back_btn, self.sb_step_label,
+        ]
+        self.sb_skip_storyboard_btn.click(
+            fn=self._enter_step4,
+            inputs=[self.sb_state],
+            outputs=[*step_outputs, *self._all_vid_panel_outputs(), self.sb_video_gallery],
+        )
 
     # ── Step 3 helpers ────────────────────────────────────────────────────────
 
