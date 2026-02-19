@@ -1031,7 +1031,6 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         # Generate Images → queue renders for all pending/rejected shots
         gen_outputs = [
             self.sb_gen_images_status,
-            self.sb_state,
             self.sb_progress_html,
             self.sb_step3_next,
             self.refresh_form_trigger,
@@ -1207,7 +1206,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
             return [
                 status_html,
-                sb_state, progress, next_btn, gr.update(),
+                progress, next_btn, gr.update(),
                 *badges, *buttons, *img_updates,
             ]
 
