@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 import copy
+import glob
 import os
 import time
+import traceback
 from typing import Any, Dict, List, Optional
 
 import gradio as gr
@@ -76,6 +78,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         self.request_global("get_default_settings")
         self.request_global("get_model_def")
         self.request_global("server_config")
+        # Headless render globals — call generate_video in-process
+        self.request_global("process_tasks_cli")
+        self.request_global("primary_settings")
+        self.request_global("get_gen_info")
         self.request_component("state")
         self.request_component("main_tabs")
         self.request_component("refresh_form_trigger")
@@ -622,7 +628,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         self.sb_char_gen_btn.click(
             fn=self._generate_character,
             inputs=[self.state, self.sb_state, self.sb_char_description, self.sb_char_resolution],
-            outputs=[self.sb_char_gen_status, self.refresh_form_trigger],
+            outputs=[self.sb_char_gen_status, self.sb_char_image],
         )
 
         # Skip button → next step with no character
@@ -649,8 +655,91 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             outputs=[self.sb_state, *self._storyboard_panel_outputs(), *step_outputs],
         )
 
+    # ── Headless render helpers ────────────────────────────────────────────
+
+    def _build_cli_state(self):
+        """Build the minimal state dict that process_tasks_cli expects."""
+        return {
+            "gen": {
+                "queue": [], "in_progress": False,
+                "file_list": [], "file_settings_list": [],
+                "audio_file_list": [], "audio_file_settings_list": [],
+                "selected": 0, "audio_selected": 0,
+                "prompt_no": 0, "prompts_max": 0,
+                "repeat_no": 0, "total_generation": 1,
+                "window_no": 0, "total_windows": 0,
+                "progress_status": "", "process_status": "process:main",
+            },
+            "loras": [],
+        }
+
+    def _build_task(self, prompt, model_type, extra_params=None, task_id=None):
+        """Build a single render task dict for process_tasks_cli."""
+        try:
+            defaults = self.get_default_settings(model_type)
+        except Exception:
+            defaults = {}
+        base = self.primary_settings.copy() if hasattr(self, 'primary_settings') and self.primary_settings else {}
+        base.update(defaults)
+        if extra_params:
+            base.update(extra_params)
+        base["prompt"] = prompt
+        base["model_type"] = model_type
+        base["base_model_type"] = model_type
+        base.setdefault("mode", "")
+        return {"id": task_id or int(time.time() * 1000), "params": base, "plugin_data": {}}
+
+    def _find_newest_output(self, extensions=None, since_ts=None, output_type="image"):
+        """Scan the wan2gp outputs directory for the newest matching file."""
+        cfg = self.server_config if hasattr(self, 'server_config') and self.server_config else {}
+        if output_type == "image":
+            out_dir = cfg.get("image_save_path", cfg.get("save_path", "outputs"))
+        else:
+            out_dir = cfg.get("save_path", "outputs")
+        if not os.path.isabs(out_dir):
+            # Resolve relative to wan2gp app directory
+            wgp_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            out_dir = os.path.join(wgp_dir, out_dir)
+        if not os.path.isdir(out_dir):
+            return None
+        if extensions is None:
+            extensions = [".png", ".jpg", ".jpeg", ".webp"] if output_type == "image" else [".mp4"]
+        candidates = []
+        for ext in extensions:
+            candidates.extend(glob.glob(os.path.join(out_dir, f"*{ext}")))
+        if not candidates:
+            return None
+        # Filter by recent timestamp if specified
+        if since_ts:
+            candidates = [f for f in candidates if os.path.getmtime(f) >= since_ts]
+        if not candidates:
+            return None
+        return max(candidates, key=os.path.getmtime)
+
+    def _run_render_tasks(self, tasks):
+        """Run a list of render tasks in-process using process_tasks_cli.
+        Returns True on success. Uses the already-loaded model (no subprocess)."""
+        cli_state = self._build_cli_state()
+        try:
+            # Build the queue list from our tasks
+            queue = []
+            for task in tasks:
+                params = task.get("params", {})
+                queue.append({
+                    "id": task.get("id", int(time.time() * 1000)),
+                    "prompt": params.get("prompt", ""),
+                    "params": params,
+                    "plugin_data": task.get("plugin_data", {}),
+                })
+            return self.process_tasks_cli(queue, cli_state)
+        except Exception as e:
+            traceback.print_exc()
+            return False
+
+    # ── Step 2: Character Generation ─────────────────────────────────────
+
     def _generate_character(self, wan2gp_state, sb_state, description, resolution):
-        """Queue a single character image generation via Wan2GP."""
+        """Generate a character image in-process (no tab switching)."""
         image_model = sb_state.get("image_model", "")
         vibe = sb_state.get("vibe", "cinematic")
         if not description.strip():
@@ -658,23 +747,33 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         if not image_model:
             return "<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", gr.update()
         try:
-            defaults = self.get_default_settings(image_model)
             res_str = RESO_MAP.get(vibe, {}).get(resolution, "832x480")
-            params = {
-                **defaults,
-                "prompt": description.strip(),
+            extra = {
                 "resolution": res_str,
-                "model_type": image_model,
-                "base_model_type": image_model,
+                "image_mode": 1,  # PNG output, not video
                 "seed": -1,
             }
-            self.set_model_settings(wan2gp_state, image_model, params)
+            task = self._build_task(description.strip(), image_model, extra)
+            before_ts = time.time()
+            gr.Info("🎨 Generating character image... this may take a moment.")
+            success = self._run_render_tasks([task])
+            if success:
+                output_path = self._find_newest_output(since_ts=before_ts, output_type="image")
+                if output_path:
+                    return (
+                        f"<span style='color:var(--primary-500)'>✅ Character image generated!</span>",
+                        output_path,
+                    )
+                return (
+                    "<span style='color:orange'>⚠️ Render finished but output file not found in outputs/.</span>",
+                    gr.update(),
+                )
             return (
-                "<span style='color:var(--primary-500)'>✅ Character queued for generation. "
-                "Switch to Video tab to generate, then return here.</span>",
-                time.time(),
+                "<span style='color:red'>❌ Render failed. Check terminal for details.</span>",
+                gr.update(),
             )
         except Exception as e:
+            traceback.print_exc()
             return f"<span style='color:red'>Error: {e}</span>", gr.update()
 
     def _save_characters_and_advance(self, state_dict, char_image):
@@ -845,8 +944,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 *badges, *buttons,
             ]
 
-        # Mark pending/rejected shots as rendering
-        queued = 0
+        # Build render tasks for all pending/rejected shots
+        res_str = RESO_MAP.get(vibe, {}).get(resolution, "832x480")
+        tasks = []
+        task_shot_indices = []  # Map task index → shot index
         for i, s in enumerate(shots[:shot_count]):
             s = dict(s)
             shots[i] = s
@@ -855,52 +956,72 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 prompt = s.get("image_prompt") or s.get("beat") or ""
                 if not prompt:
                     continue
-                try:
-                    defaults = self.get_default_settings(image_model)
-                    res_str = RESO_MAP.get(vibe, {}).get(resolution, "832x480")
-                    params = {
-                        **defaults,
-                        "prompt": prompt,
-                        "resolution": res_str,
-                        "model_type": image_model,
-                        "base_model_type": image_model,
-                        "seed": s.get("seed", -1),
-                    }
-                    # Attach character reference if present
-                    char_images = sb_state.get("character_images", [])
-                    if char_images:
-                        ref = next((c for c in char_images if c), None)
-                        if ref and os.path.exists(ref):
-                            params["image_start"] = ref
-                    self.set_model_settings(wan2gp_state, image_model, params)
-                    s["status"] = STATUS_RENDERING if not is_auto else STATUS_APPROVED
-                    queued += 1
-                except Exception as e:
-                    progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
-                    return [
-                        f"<span style='color:red'>Error queuing shot {i+1}: {e}</span>",
-                        sb_state, progress, next_btn, gr.update(),
-                        *badges, *buttons,
-                    ]
+                extra = {
+                    "resolution": res_str,
+                    "image_mode": 1,  # PNG output
+                    "seed": s.get("seed", -1),
+                }
+                # Attach character reference if present
+                char_images = sb_state.get("character_images", [])
+                if char_images:
+                    ref = next((c for c in char_images if c), None)
+                    if ref and os.path.exists(ref):
+                        extra["image_start"] = ref
+                tasks.append(self._build_task(prompt, image_model, extra))
+                task_shot_indices.append(i)
+                s["status"] = STATUS_RENDERING
 
         sb_state["shots"] = shots
         sb_state["resolution"] = resolution
 
-        # In auto mode, mark all rendering shots as approved immediately
-        if is_auto:
-            for s in shots[:shot_count]:
-                if s.get("status") == STATUS_RENDERING:
-                    s["status"] = STATUS_APPROVED
+        if not tasks:
+            progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
+            return [
+                "<span style='color:orange'>No pending shots to generate.</span>",
+                sb_state, progress, next_btn, gr.update(),
+                *badges, *buttons,
+            ]
 
+        # Run all image tasks in-process (headless render)
+        gr.Info(f"🎨 Rendering {len(tasks)} shot image(s)... this may take a while.")
+        before_ts = time.time()
+        try:
+            success = self._run_render_tasks(tasks)
+        except Exception as e:
+            traceback.print_exc()
+            success = False
+
+        # Scan outputs for generated images and assign to shots
+        cfg = self.server_config if hasattr(self, 'server_config') and self.server_config else {}
+        out_dir = cfg.get("image_save_path", cfg.get("save_path", "outputs"))
+        if not os.path.isabs(out_dir):
+            wgp_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            out_dir = os.path.join(wgp_dir, out_dir)
+        img_exts = [".png", ".jpg", ".jpeg", ".webp"]
+        recent = []
+        if os.path.isdir(out_dir):
+            for ext in img_exts:
+                recent.extend(glob.glob(os.path.join(out_dir, f"*{ext}")))
+            recent = [f for f in recent if os.path.getmtime(f) >= before_ts]
+            recent.sort(key=os.path.getmtime)
+
+        # Assign outputs to shots in task order
+        rendered = 0
+        for idx, shot_i in enumerate(task_shot_indices):
+            if idx < len(recent):
+                shots[shot_i]["ref_image_path"] = recent[idx]
+                shots[shot_i]["status"] = STATUS_APPROVED if is_auto else STATUS_READY
+                rendered += 1
+            else:
+                shots[shot_i]["status"] = STATUS_PENDING  # Reset if no output
+
+        sb_state["shots"] = shots
         progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
 
-        if queued == 0:
-            status_html = "<span style='color:orange'>No pending shots to generate.</span>"
+        if rendered > 0:
+            status_html = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(tasks)} shot image(s) generated!</span>"
         else:
-            status_html = (
-                f"<span style='color:var(--primary-500)'>✅ {queued} shot(s) queued. "
-                f"Switch to Video tab to start generation, then come back to approve.</span>"
-            )
+            status_html = "<span style='color:red'>❌ No images generated. Check terminal for errors.</span>"
 
         return [
             status_html,
@@ -967,11 +1088,11 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             outputs=[self.sb_advanced_duration, self.sb_duration_mode_btn, self.sb_shot_duration],
         )
 
-        # Export
+        # Export — renders in-process, no tab switch needed
         self.sb_export_btn.click(
             fn=self._export_videos,
             inputs=[self.state, self.sb_state, self.sb_shot_duration],
-            outputs=[self.sb_export_status, self.sb_progress_md, self.main_tabs],
+            outputs=[self.sb_export_status, self.sb_progress_md],
         )
 
         # New project
@@ -1008,6 +1129,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         return f"<small>{duration}s{note}{gpu_note}</small>"
 
     def _export_videos(self, wan2gp_state, sb_state, shot_duration):
+        """Render all video shots in-process (no tab switching)."""
         shots = sb_state.get("shots", [])
         video_model = sb_state.get("video_model", "")
         vibe = sb_state.get("vibe", "cinematic")
@@ -1015,14 +1137,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         resolution = sb_state.get("resolution", "480p")
 
         if not shots:
-            return "<span style='color:red'>No shots found. Go back to Step 1.</span>", "", gr.update()
+            return "<span style='color:red'>No shots found. Go back to Step 1.</span>", ""
         if not video_model:
-            return (
-                "<span style='color:red'>No video model selected. Go back to Step 1.</span>",
-                "", gr.update(),
-            )
+            return "<span style='color:red'>No video model selected. Go back to Step 1.</span>", ""
 
-        queued = 0
+        # Build video render tasks
+        tasks = []
+        task_shot_indices = []
         errors = []
         for i, s in enumerate(shots[:shot_count]):
             prompt = s.get("video_prompt") or s.get("beat") or ""
@@ -1041,24 +1162,69 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 except Exception:
                     defaults = {}
                 params = build_video_params(shot_obj, video_model, shot_duration, vibe, defaults)
-                # Override resolution from vibe map if available
                 res_str = VIDEO_RESOLUTION.get(vibe, {}).get(resolution, "832x480")
                 params["resolution"] = res_str
-                self.set_model_settings(wan2gp_state, video_model, params)
-                queued += 1
+                # Attach shot ref image for i2v if available
+                ref_path = s.get("ref_image_path")
+                if ref_path and os.path.exists(ref_path):
+                    params["image_start"] = ref_path
+                task = self._build_task(prompt, video_model, params)
+                tasks.append(task)
+                task_shot_indices.append(i)
             except Exception as e:
                 errors.append(f"Shot {i+1}: {e}")
 
-        if errors:
-            status = f"<span style='color:orange'>⚠️ {queued} queued, errors: {'; '.join(errors)}</span>"
-        else:
-            status = f"<span style='color:var(--primary-500)'>✅ {queued} shots queued for video render.</span>"
+        if not tasks:
+            err_msg = "; ".join(errors) if errors else "No shots with prompts"
+            return f"<span style='color:red'>❌ {err_msg}</span>", ""
 
-        progress = "\n".join(
-            f"- **Shot {i+1}**: {shots[i].get('beat','')[:60]}…"
-            for i in range(min(queued, shot_count))
-        )
-        return status, progress, gr.Tabs(selected="video_gen")
+        # Run all video tasks in-process
+        gr.Info(f"🎬 Rendering {len(tasks)} video(s)... this will take a while.")
+        before_ts = time.time()
+        try:
+            success = self._run_render_tasks(tasks)
+        except Exception as e:
+            traceback.print_exc()
+            success = False
+
+        # Scan outputs for generated videos and assign to shots
+        cfg = self.server_config if hasattr(self, 'server_config') and self.server_config else {}
+        out_dir = cfg.get("save_path", "outputs")
+        if not os.path.isabs(out_dir):
+            wgp_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            out_dir = os.path.join(wgp_dir, out_dir)
+        recent = []
+        if os.path.isdir(out_dir):
+            recent.extend(glob.glob(os.path.join(out_dir, "*.mp4")))
+            recent = [f for f in recent if os.path.getmtime(f) >= before_ts]
+            recent.sort(key=os.path.getmtime)
+
+        rendered = 0
+        video_paths = []
+        for idx, shot_i in enumerate(task_shot_indices):
+            if idx < len(recent):
+                shots[shot_i]["video_path"] = recent[idx]
+                video_paths.append(recent[idx])
+                rendered += 1
+
+        progress_lines = []
+        for idx, shot_i in enumerate(task_shot_indices):
+            shot = shots[shot_i]
+            beat_preview = (shot.get('beat', '') or '')[:60]
+            if idx < len(recent):
+                progress_lines.append(f"✅ **Shot {shot_i+1}**: {beat_preview}")
+            else:
+                progress_lines.append(f"❌ **Shot {shot_i+1}**: {beat_preview} — no output")
+
+        if errors:
+            progress_lines.extend([f"⚠️ {e}" for e in errors])
+
+        if rendered > 0:
+            status = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(tasks)} video(s) rendered!</span>"
+        else:
+            status = "<span style='color:red'>❌ No videos generated. Check terminal for errors.</span>"
+
+        return status, "\n".join(progress_lines)
 
     def _new_project(self):
         clear_session()

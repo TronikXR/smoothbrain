@@ -249,9 +249,13 @@ def pack(
     else:
         story_input = "Invent a completely original, surprising, and visually stunning short story. Be creative and unexpected. Break it into shots."
 
-    genres_active = [g for g, w in weights.items() if w > 0]
+    genres_active = {g: w for g, w in weights.items() if w > 0}
     if genres_active:
-        story_input += f"\nGenre influences: {', '.join(genres_active)}"
+        total = sum(genres_active.values())
+        genre_parts = [f"{g} ({round(w/total*100)}%)" for g, w in
+                       sorted(genres_active.items(), key=lambda x: -x[1])]
+        story_input += f"\nGenre mix (approximate weight): {', '.join(genre_parts)}."
+        story_input += " Lean the tone and visual style toward the higher-weighted genres."
 
     system = (
         f"You are a professional filmmaker's storyboard assistant. Generate exactly {count} diverse, "
