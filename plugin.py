@@ -354,11 +354,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
         # ── Asset Pool ──
         self.sb_asset_pool = gr.Gallery(
-            label="📁 Generated Images (click to use)",
+            label="📁 All Generated Characters",
             columns=6,
             height=120,
             interactive=False,
-            visible=False,
         )
 
         # ── Skip / Continue buttons ──
@@ -447,7 +446,6 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             columns=6,
             height=140,
             interactive=False,
-            visible=False,
         )
 
         # ── Bottom generate button (so user doesn't scroll) ──
@@ -534,7 +532,6 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             columns=4,
             height=160,
             interactive=False,
-            visible=False,
         )
 
         # ── Bottom re-generate button ──
@@ -573,13 +570,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         self.sb_step1_next.click(
             fn=self._enter_step2,
             inputs=[self.sb_concept, self.sb_state],
-            outputs=[*step_outputs, self.sb_char_description, self.sb_state],
+            outputs=[*step_outputs, self.sb_char_description, self.sb_state, self.sb_asset_pool],
         )
         # sb_step2_next is wired in _wire_step2 (combines save + navigate)
         self.sb_step3_next.click(
             fn=self._enter_step4,
             inputs=[self.sb_state],
-            outputs=[*step_outputs, *self._all_vid_panel_outputs()],
+            outputs=[*step_outputs, *self._all_vid_panel_outputs(), self.sb_video_gallery],
         )
         self.sb_back_btn.click(fn=self._go_back, inputs=[self.sb_state], outputs=step_outputs)
 
@@ -700,7 +697,8 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         sb_state["concept"] = concept
         sb_state["current_step"] = 2
         save_project(sb_state)
-        return [*self._step_visibility(2), concept, sb_state]
+        char_gallery = self._refresh_gallery(sb_state, "characters")
+        return [*self._step_visibility(2), concept, sb_state, char_gallery]
 
     def _on_project_dropdown_change(self, selection):
         """Show import path textbox when 'Import from folder...' is selected."""
@@ -831,7 +829,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         self.sb_char_gen_btn.click(
             fn=self._generate_character,
             inputs=[self.state, self.sb_state, self.sb_char_description, self.sb_char_resolution],
-            outputs=[self.sb_char_gen_status, self.sb_char_image],
+            outputs=[self.sb_char_gen_status, self.sb_char_image, self.sb_asset_pool],
         )
 
         # Skip button → next step with no character
@@ -946,16 +944,17 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         image_model = sb_state.get("image_model", "")
         vibe = sb_state.get("vibe", "cinematic")
         if not description.strip():
-            yield "<span style='color:orange'>Enter a character description first.</span>", gr.update()
+            yield "<span style='color:orange'>Enter a character description first.</span>", gr.update(), gr.update()
             return
         if not image_model:
-            yield "<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", gr.update()
+            yield "<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", gr.update(), gr.update()
             return
         try:
             # Phase 1: Refine prompt
             yield (
                 "<span style='color:var(--primary-400)'>"
                 "⏳ <b>Refining prompt</b> using model guide...</span>",
+                gr.update(),
                 gr.update(),
             )
             refined = refine_single_prompt(description.strip(), image_model, purpose="image")
@@ -977,29 +976,38 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 "🎨 <b>Generating image</b> — this may take a minute or two..."
                 "<br><small>Check terminal for live progress.</small></span>",
                 gr.update(),
+                gr.update(),
             )
             success = self._run_render_tasks([task])
 
             if success:
                 output_path = self._find_newest_output(since_ts=before_ts, output_type="image")
                 if output_path:
+                    # Copy to project folder
+                    project_dir = sb_state.get("project_dir", "")
+                    if project_dir:
+                        copy_to_project(output_path, project_dir, "characters")
+                    char_gallery = self._refresh_gallery(sb_state, "characters")
                     yield (
                         "<span style='color:var(--primary-500)'>✅ Character image generated!</span>",
                         output_path,
+                        char_gallery,
                     )
                     return
                 yield (
                     "<span style='color:orange'>⚠️ Render finished but output file not found in outputs/.</span>",
+                    gr.update(),
                     gr.update(),
                 )
                 return
             yield (
                 "<span style='color:red'>❌ Render failed. Check terminal for details.</span>",
                 gr.update(),
+                gr.update(),
             )
         except Exception as e:
             traceback.print_exc()
-            yield f"<span style='color:red'>Error: {e}</span>", gr.update()
+            yield f"<span style='color:red'>Error: {e}</span>", gr.update(), gr.update()
 
     def _save_characters_and_advance(self, state_dict, char_image):
         """Save character data, prefill concept, then navigate to Step 3."""
@@ -1037,6 +1045,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             *self._all_badge_outputs(),
             *self._all_button_outputs(),
             *self._all_image_outputs(),
+            self.sb_image_gallery,
         ]
         self.sb_gen_images_btn.click(
             fn=self._queue_image_renders,
@@ -1204,10 +1213,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 else:
                     img_updates.append(gr.update())
 
+            gallery = self._refresh_gallery(sb_state, "images")
+
             return [
                 status_html,
                 progress, next_btn, gr.update(),
                 *badges, *buttons, *img_updates,
+                gallery,
             ]
 
         if not shots:
@@ -1458,6 +1470,14 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
     # ── Step 4 helpers ────────────────────────────────────────────────────────
 
+    def _refresh_gallery(self, sb_state, subfolder, extensions=None):
+        """Return a gr.update for a gallery component with files from project subfolder."""
+        project_dir = sb_state.get("project_dir", "") if isinstance(sb_state, dict) else ""
+        if not project_dir:
+            return gr.update(value=[])
+        files = scan_project_gallery(project_dir, subfolder, extensions)
+        return gr.update(value=files)
+
     def _enter_step4(self, sb_state):
         """Navigate to Step 4 and populate video cards."""
         sb_state = dict(sb_state)
@@ -1465,7 +1485,8 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         save_project(sb_state)
         step_updates = list(self._step_visibility(4))
         panel_updates = self._make_video_panel_updates(sb_state)
-        return [*step_updates, *panel_updates]
+        vid_gallery = self._refresh_gallery(sb_state, "videos", [".mp4"])
+        return [*step_updates, *panel_updates, vid_gallery]
 
     def _all_vid_panel_outputs(self):
         """All outputs needed to populate video cards (group + badge + prompt)."""

@@ -310,5 +310,6 @@ def build_video_params(
     }
     if shot.ref_image_path and os.path.exists(shot.ref_image_path):
         params["image_start"] = shot.ref_image_path
+        params["image_prompt_type"] = "S"
 
     return params
