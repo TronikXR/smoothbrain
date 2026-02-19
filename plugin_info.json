@@ -1,0 +1,8 @@
+{
+    "name": "Smooth Brain",
+    "author": "hoodtronik",
+    "version": "1.0.0",
+    "description": "AI-powered one-click short film generation. 4-step wizard: story concept → character refs → storyboard → video export. Includes Ollama prompt packing with model-specific refinement.",
+    "date": "2026-02-19",
+    "wan2gp_version": "2.52+"
+}
