@@ -71,17 +71,17 @@ IMAGE_MODEL_OVERRIDES = {
         ],
         "loras_multipliers": "1|",
     },
-    # Qwen Image Edit Plus 20B (2509) — uses 2511 Lightning lora
+    # Qwen Image Edit Plus 20B (2509) — same v1.0 Lightning lora as base edit
     "qwen_image_edit_plus_20B": {
         "num_inference_steps": 4,
         "guidance_scale": 1,
         "flow_shift": 5,
         "sample_solver": "default",
         "image_mode": 1,
-        "lset_name": "qwen\\Lightning Qwen Edit 2511 - 4 Steps.json",
+        "lset_name": "qwen\\Lightning Qwen Edit v1.0 - 4 Steps.json",
         "activated_loras": [
             "https://huggingface.co/DeepBeepMeep/Qwen_image/resolve/main/"
-            "loras_accelerators/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+            "loras_accelerators/Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors"
         ],
         "loras_multipliers": "1|",
     },
