@@ -160,6 +160,55 @@ def _generate(model: str, system: str, prompt: str, temperature: float = 0.9, ma
         return r.json().get("response", "")
 
 
+def describe_character_image(image_path: str) -> Optional[str]:
+    """Use Ollama vision to analyze a character image and describe them in detail.
+
+    Returns a concise character description (appearance, clothing, features) or None if
+    vision is not available. The description is used to reinforce character consistency
+    in shot prompts.
+    """
+    if not is_online() or not HAS_HTTPX:
+        return None
+
+    import base64
+    try:
+        with open(image_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+    except Exception:
+        return None
+
+    # Try vision-capable models in preference order
+    model_name = get_model_name()
+    system = (
+        "You are a visual description specialist. Describe the character in this image in detail. "
+        "Focus on: physical appearance, clothing, accessories, hair, posture, and any distinguishing features. "
+        "Be specific and concise (under 60 words). Output ONLY the description, no commentary."
+    )
+
+    try:
+        with _client() as c:
+            r = c.post("/api/generate", json={
+                "model": model_name,
+                "prompt": "Describe this character in detail for use as a prompt reference.",
+                "system": system,
+                "images": [img_b64],
+                "stream": False,
+                "keep_alive": 0,
+                "options": {
+                    "temperature": 0.3,
+                    "num_predict": 256,
+                },
+            }, timeout=TIMEOUT)
+            r.raise_for_status()
+            desc = r.json().get("response", "").strip()
+            if desc and len(desc) > 10:
+                print(f"  [vision] Character description: {desc[:120]}...")
+                return desc
+    except Exception as e:
+        print(f"  [vision] Character scan failed (model may not support vision): {e}")
+    return None
+
+
 def _fallback_shots(concept: str, genre_weights: Dict[str, int], shot_count: int) -> List[Dict]:
     """Generate shots from templates when Ollama is offline."""
     templates = get_weighted_templates(genre_weights, count=1)
@@ -194,6 +243,7 @@ def _refine_prompts(
         f"You MUST respond with ONLY valid JSON — an array of exactly {len(shots)} objects:\n"
         f"[{{\"imagePrompt\": \"...\", \"videoPrompt\": \"...\"}}]\n"
         f"Rules:\n"
+        f"- ALWAYS include the main subject or character in every prompt — never omit who or what is in the scene.\n"
         f"- Preserve the original creative intent of each shot.\n"
         f"- Apply model-specific syntax rules from the guides above.\n"
         f"- If no image guide, copy the original prompt as imagePrompt.\n"
@@ -252,6 +302,7 @@ def refine_single_prompt(
         f"the syntax, keywords, and rules of the target {purpose} model.\n"
         f"\n{guide_text}\n\n"
         f"Rules:\n"
+        f"- ALWAYS include the main subject or character — never omit who or what is in the scene.\n"
         f"- Preserve the original creative intent completely.\n"
         f"- Apply model-specific syntax rules from the guide above.\n"
         f"- Do NOT add new scene elements — only optimize the language.\n"

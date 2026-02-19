@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import gradio as gr
 from shared.utils.plugins import WAN2GPPlugin
 
-from .ollama import pack as ollama_pack, get_status as ollama_status, is_online, refine_single_prompt
+from .ollama import pack as ollama_pack, get_status as ollama_status, is_online, refine_single_prompt, describe_character_image
 from .state import (
     SmoothBrainSession, ShotState,
     save_session, load_session, clear_session,
@@ -422,6 +422,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                             f"<span style='opacity:0.5;font-size:11px'>⏳ pending</span>"
                         )
                     beat_md = gr.Markdown("")
+                    prompt_box = gr.Textbox(
+                        label="Image Prompt",
+                        placeholder="Edit the image prompt here...",
+                        lines=2,
+                        interactive=True,
+                        visible=False,
+                    )
                     img = gr.Image(
                         label=f"Shot {i+1} Frame",
                         type="filepath",
@@ -442,6 +449,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                         "group": grp,
                         "badge": shot_badge,
                         "beat_md": beat_md,
+                        "prompt_box": prompt_box,
                         "img": img,
                         "char_assign": char_assign,
                         "approve_btn": approve_btn,
@@ -1032,6 +1040,12 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         # Prefill character description from Round 1 concept (TronikSlate parity)
         if not state_dict.get("character_description"):
             state_dict["character_description"] = state_dict.get("concept", "")
+        # Vision scan: get detailed character description from the image
+        if char_image:
+            vision_desc = describe_character_image(char_image)
+            if vision_desc:
+                state_dict["character_vision_description"] = vision_desc
+                print(f"  [vision] Stored character description: {vision_desc[:100]}...")
         shot_count = state_dict.get("shot_count", 6)
         shots = state_dict.get("shots", [])
         char_names = state_dict.get("character_names", [])
@@ -1110,6 +1124,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 ],
             )
 
+        # Per-shot prompt_box → save edited prompt to state
+        for i, panel in enumerate(self.sb_storyboard_panels):
+            panel["prompt_box"].change(
+                fn=lambda state, text, idx=i: self._update_shot_prompt(state, idx, text),
+                inputs=[self.sb_state, panel["prompt_box"]],
+                outputs=[self.sb_state],
+            )
         # LTX skip storyboard button
         step_outputs = [
             self.step1_panel, self.step2_panel,
@@ -1182,7 +1203,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 if status == STATUS_APPROVED:
                     approved += 1
                 badge_updates.append(gr.update(value=self._shot_badge_html(i, status)))
-                show_buttons = (status == STATUS_READY)
+                show_buttons = status in (STATUS_READY, STATUS_APPROVED, STATUS_REJECTED)
                 button_updates.extend([
                     gr.update(visible=show_buttons),
                     gr.update(visible=show_buttons),
@@ -1237,7 +1258,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             for i in range(n_panels):
                 if changed_shot is not None and i == changed_shot:
                     status = shots[i].get("status", STATUS_PENDING) if i < len(shots) else STATUS_PENDING
-                    show = (status == STATUS_READY)
+                    show = status in (STATUS_READY, STATUS_APPROVED, STATUS_REJECTED)
                     buttons.extend([gr.update(visible=show), gr.update(visible=show)])
                 else:
                     buttons.extend([gr.update(), gr.update()])
@@ -1297,6 +1318,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         for task_idx, shot_i in enumerate(to_render):
             s = shots[shot_i]
             raw_prompt = s.get("image_prompt") or s.get("beat") or ""
+            # Prepend character description from vision scan for consistency
+            char_desc = sb_state.get("character_vision_description", "")
+            if char_desc:
+                raw_prompt = f"{char_desc}. {raw_prompt}"
             prompt = refine_single_prompt(raw_prompt, image_model, purpose="image")
             print(f"[SmoothBrain] Shot {shot_i+1} image → {prompt[:120]}")
 
@@ -1382,10 +1407,20 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
         return [sb_state, progress, next_btn, *badges, *buttons]
 
+    def _update_shot_prompt(self, sb_state, shot_index, new_prompt):
+        """Save user-edited prompt back to state."""
+        sb_state = dict(sb_state)
+        shots = list(sb_state.get("shots", []))
+        if shot_index < len(shots):
+            shots[shot_index] = dict(shots[shot_index])
+            shots[shot_index]["image_prompt"] = new_prompt
+        sb_state["shots"] = shots
+        return sb_state
+
     def _storyboard_panel_outputs(self):
         out = []
         for p in self.sb_storyboard_panels:
-            out.extend([p["group"], p["badge"], p["beat_md"], p["char_assign"]])
+            out.extend([p["group"], p["badge"], p["beat_md"], p["prompt_box"], p["char_assign"]])
         return out
 
     def _make_storyboard_updates(self, shots, shot_count, char_choices):
@@ -1395,11 +1430,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         for i, panel in enumerate(self.sb_storyboard_panels):
             visible = i < shot_count
             beat = shots[i]["beat"] if i < len(shots) else ""
+            prompt = shots[i].get("image_prompt", beat) if i < len(shots) else ""
             status = shots[i].get("status", STATUS_PENDING) if i < len(shots) else STATUS_PENDING
             updates.extend([
                 gr.update(visible=visible),
                 gr.update(value=self._shot_badge_html(i, status)),
                 gr.update(value=f"*{beat}*" if beat else ""),
+                gr.update(value=prompt, visible=visible),
                 gr.update(choices=char_choices, value=default_char),
             ])
         return updates
