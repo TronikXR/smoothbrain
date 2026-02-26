@@ -330,6 +330,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                     self.sb_char_gen_btn = gr.Button(
                         "🎨 Generate Character Image", variant="primary", scale=2,
                     )
+                    self.sb_char_stop_btn = gr.Button(
+                        "🛑 Stop", variant="stop", scale=0, visible=False,
+                    )
                     with gr.Column(scale=3):
                         self.sb_char_gen_status = gr.HTML("")
 
@@ -435,7 +438,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                         label=f"Shot {i+1} Frame",
                         type="filepath",
                         interactive=True,
-                        height=180,
+                        height=400,
                     )
                     char_assign = gr.Dropdown(
                         label="Character Reference",
@@ -514,7 +517,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
         # ── Generate button + status ──
         with gr.Row():
-            self.sb_export_btn = gr.Button("🎬 Export All Videos", variant="primary", scale=2)
+            self.sb_export_btn = gr.Button("🎥 Process Videos", variant="primary", scale=2)
+            self.sb_stop_video_btn_top = gr.Button(
+                "🛑 Stop", variant="stop", scale=0, visible=False,
+            )
             with gr.Column(scale=3):
                 self.sb_export_status = gr.HTML("")
 
@@ -558,7 +564,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         # ── Bottom re-generate button ──
         with gr.Row():
             self.sb_export_btn_bottom = gr.Button(
-                "🎬 Re-render Rejected", variant="secondary", scale=2,
+                "🎥 Re-process Rejected", variant="secondary", scale=2,
             )
             self.sb_stop_video_btn = gr.Button(
                 "🛑 Stop Render", variant="stop", scale=1, visible=False,
@@ -679,6 +685,12 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 self.sb_vibe,
                 self.sb_roll_status,
                 *step_outputs,
+                self.sb_char_image,
+                self.sb_progress_html,
+                self.sb_step3_next,
+                *self._storyboard_panel_outputs(),
+                *self._all_vid_panel_outputs(),
+                self.sb_video_gallery,
             ],
         )
 
@@ -750,26 +762,60 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                         project_dir = p["path"]
                         break
 
+        n_outputs = 15 + 11 * len(self.sb_storyboard_panels)
         if not project_dir:
             gr.Warning("No project selected")
-            return [gr.update()] * 11
+            return [gr.update()] * n_outputs
 
         data = load_project(project_dir)
         if not data:
             gr.Warning("Could not load project")
-            return [gr.update()] * 11
+            return [gr.update()] * n_outputs
 
         step = data.get("current_step", 1)
         step_vis = list(self._step_visibility(step))
         gr.Info(f"📂 Resumed: {data.get('concept', 'Untitled')[:40]} at Step {step}")
+
+        # Restore character image (Step 2)
+        char_images = data.get("character_images", [])
+        char_image = next((c for c in char_images if c and os.path.exists(c)), None)
+
+        # Restore storyboard panels (Step 3)
+        shots = data.get("shots", [])
+        shot_count = data.get("shot_count", 6)
+        char_names = data.get("character_names", [])
+        char_choices = ["None"] + [n for n in char_names if n]
+        panel_updates = self._make_storyboard_updates(shots, shot_count, char_choices)
+
+        # Restore progress bar + Step 3 next button
+        approved = sum(1 for s in shots[:shot_count] if s.get("status") == STATUS_APPROVED)
+        progress = self._progress_bar_html(approved, shot_count)
+        all_have_images = shot_count > 0 and all(
+            shots[i].get("ref_image_path") for i in range(shot_count) if i < len(shots)
+        )
+        next_btn = gr.update(interactive=all_have_images)
+
+        # Restore video panels (Step 4)
+        if step >= 4:
+            vid_panel_updates = self._make_video_panel_updates(data)
+            vid_gallery = self._refresh_gallery(data, "videos", [".mp4"])
+        else:
+            vid_panel_updates = [gr.update()] * (3 * len(self.sb_video_panels))
+            vid_gallery = gr.update()
 
         return [
             data,                                    # sb_state
             data.get("concept", ""),                 # sb_concept
             data.get("shot_count", 6),               # sb_shot_count
             data.get("vibe", "cinematic"),            # sb_vibe
-            f"<span style='color:var(--primary-500)'>📂 Project loaded</span>",  # roll_status
+            f"<span style='color:var(--primary-500)'>📂 Project loaded at Step {step}</span>",
             *step_vis,                               # step panels + back btn + label
+            char_image,                              # sb_char_image
+            progress,                                # sb_progress_html
+            next_btn,                                # sb_step3_next
+            *panel_updates,                          # storyboard panels
+            *vid_panel_updates,                      # video panels
+            vid_gallery,                             # sb_video_gallery
         ]
 
     def _do_roll(self, concept, shot_count, video_model, image_model, *genre_sliders):
@@ -853,7 +899,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         self.sb_char_gen_btn.click(
             fn=self._generate_character,
             inputs=[self.state, self.sb_state, self.sb_char_description, self.sb_char_resolution],
-            outputs=[self.sb_char_gen_status, self.sb_char_image, self.sb_asset_pool],
+            outputs=[self.sb_char_gen_status, self.sb_char_stop_btn, self.sb_char_image, self.sb_asset_pool],
+        )
+        # Stop character render button
+        self.sb_char_stop_btn.click(
+            fn=self._stop_render,
+            inputs=[],
+            outputs=[self.sb_char_stop_btn],
         )
 
         # Skip button → next step with no character
@@ -903,6 +955,37 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             },
             "loras": [],
         }
+
+    def _get_fastest_profile(self, model_id: str) -> dict | None:
+        """Auto-select the fastest speed profile for a video model.
+        Matches TronikSlate's ranking: i2v preference → latest date → lowest steps.
+        Returns the profile dict {name, params} or None.
+        """
+        import re
+        profiles = scan_profiles(model_id)
+        if not profiles:
+            return None
+        is_i2v = "i2v" in model_id.lower() or "ti2v" in model_id.lower()
+
+        def _rank(p):
+            name = p["name"].lower()
+            # 1) Prefer i2v profiles for i2v models
+            i2v_score = 0 if (is_i2v and "i2v" in name) else 1
+            # 2) Prefer latest date (e.g. "v2025-10-14")
+            date_match = re.search(r"v?(\d{4}[-/]\d{2}[-/]\d{2})", name)
+            date_str = date_match.group(1).replace("/", "-") if date_match else "0000-00-00"
+            # 3) Prefer lowest steps (e.g. "4 steps")
+            steps_match = re.search(r"(\d+)\s*steps?", name)
+            steps = int(steps_match.group(1)) if steps_match else 999
+            return (i2v_score, date_str, steps)  # sort: 0 < 1 for i2v, reverse for date, ascending for steps
+
+        # Sort: i2v_score ascending, date DESCENDING (negate via reverse string comparison), steps ascending
+        ranked = sorted(profiles, key=lambda p: (
+            _rank(p)[0],
+            "".join(chr(255 - ord(c)) for c in _rank(p)[1]),  # reverse date sort
+            _rank(p)[2],
+        ))
+        return ranked[0] if ranked else None
 
     def _build_task(self, prompt, model_type, extra_params=None, task_id=None):
         """Build a single render task dict for process_tasks_cli."""
@@ -1003,16 +1086,17 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         image_model = sb_state.get("image_model", "")
         vibe = sb_state.get("vibe", "cinematic")
         if not description.strip():
-            yield "<span style='color:orange'>Enter a character description first.</span>", gr.update(), gr.update()
+            yield "<span style='color:orange'>Enter a character description first.</span>", gr.update(visible=False), gr.update(), gr.update()
             return
         if not image_model:
-            yield "<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", gr.update(), gr.update()
+            yield "<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", gr.update(visible=False), gr.update(), gr.update()
             return
         try:
-            # Phase 1: Refine prompt
+            # Phase 1: Refine prompt — show stop button
             yield (
                 "<span style='color:var(--primary-400)'>"
                 "⏳ <b>Refining prompt</b> using model guide...</span>",
+                gr.update(visible=True),
                 gr.update(),
                 gr.update(),
             )
@@ -1023,17 +1107,18 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             res_str = RESO_MAP.get(vibe, {}).get(resolution, "832x480")
             extra = {
                 "resolution": res_str,
-                "image_mode": 1,  # PNG output, not video
+                "image_mode": 1,
                 "seed": -1,
             }
             task = self._build_task(refined, image_model, extra)
             before_ts = time.time()
 
-            # Phase 2: Render
+            # Phase 2: Render — stop button stays visible
             yield (
                 "<span style='color:var(--primary-400)'>"
                 "🎨 <b>Generating image</b> — this may take a minute or two..."
                 "<br><small>Check terminal for live progress.</small></span>",
+                gr.update(visible=True),
                 gr.update(),
                 gr.update(),
             )
@@ -1049,24 +1134,27 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                     char_gallery = self._refresh_gallery(sb_state, "characters")
                     yield (
                         "<span style='color:var(--primary-500)'>✅ Character image generated!</span>",
+                        gr.update(visible=False),
                         output_path,
                         char_gallery,
                     )
                     return
                 yield (
                     "<span style='color:orange'>⚠️ Render finished but output file not found in outputs/.</span>",
+                    gr.update(visible=False),
                     gr.update(),
                     gr.update(),
                 )
                 return
             yield (
                 "<span style='color:red'>❌ Render failed. Check terminal for details.</span>",
+                gr.update(visible=False),
                 gr.update(),
                 gr.update(),
             )
         except Exception as e:
             traceback.print_exc()
-            yield f"<span style='color:red'>Error: {e}</span>", gr.update(), gr.update()
+            yield f"<span style='color:red'>Error: {e}</span>", gr.update(visible=False), gr.update(), gr.update()
 
     def _save_characters_and_advance(self, state_dict, char_image):
         """Save character data, prefill concept, then navigate to Step 3."""
@@ -1116,6 +1204,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         # Generate Images → queue renders for all pending/rejected shots
         gen_outputs = [
             self.sb_gen_images_status,
+            self.sb_state,
             self.sb_progress_html,
             self.sb_step3_next,
             self.refresh_form_trigger,
@@ -1256,9 +1345,12 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 badge_updates.append(gr.update())
                 button_updates.extend([gr.update(), gr.update()])
 
-        all_approved = approved == shot_count and shot_count > 0
+        all_have_images = shot_count > 0 and all(
+            shots[i].get("ref_image_path") for i in range(shot_count) if i < len(shots)
+        )
         progress = self._progress_bar_html(approved, shot_count)
-        next_btn = gr.update(interactive=all_approved)
+        next_btn = gr.update(interactive=all_have_images)
+
 
         return progress, next_btn, badge_updates, button_updates
 
@@ -1279,8 +1371,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         is_auto = auto_mode == "Auto"
         n_panels = len(self.sb_storyboard_panels)
 
-        def _yield_state(status_html: str, sb_state: dict, changed_shot: int = None, stop_btn_visible: bool = None):
-            """Build yield tuple for the generator, updating relevant outputs."""
+        def _yield_state(status_html: str, sb_state: dict, changed_shot: int = None, stop_btn_visible: bool = None, preserve_state: bool = False):
+            """Build yield tuple for the generator, updating relevant outputs.
+            preserve_state=True → emit gr.update() for state slot so user approvals aren't overwritten.
+            """
             shots = sb_state.get("shots", [])
             shot_count = sb_state.get("shot_count", 0)
             n_panels = len(self.sb_storyboard_panels)
@@ -1289,29 +1383,31 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             approved = sum(1 for s in shots[:shot_count]
                            if s.get("status") == STATUS_APPROVED)
             progress = self._progress_bar_html(approved, shot_count)
-            all_approved = approved == shot_count and shot_count > 0
-            next_btn = gr.update(interactive=all_approved)
+            all_have_images = shot_count > 0 and all(
+                shots[i].get("ref_image_path") for i in range(shot_count) if i < len(shots)
+            )
+            next_btn = gr.update(interactive=all_have_images)
 
-            # Badges: only update the changed shot
+            # Badges: always update all shots so none get stuck on a stale status
             badges = []
             for i in range(n_panels):
-                if changed_shot is not None and i == changed_shot:
-                    status = shots[i].get("status", STATUS_PENDING) if i < len(shots) else STATUS_PENDING
+                if i < len(shots):
+                    status = shots[i].get("status", STATUS_PENDING)
                     badges.append(gr.update(value=self._shot_badge_html(i, status)))
                 else:
                     badges.append(gr.update())
 
-            # Buttons: only update the changed shot
+            # Buttons: always update all shots
             buttons = []
             for i in range(n_panels):
-                if changed_shot is not None and i == changed_shot:
-                    status = shots[i].get("status", STATUS_PENDING) if i < len(shots) else STATUS_PENDING
+                if i < len(shots):
+                    status = shots[i].get("status", STATUS_PENDING)
                     show = status in (STATUS_READY, STATUS_APPROVED, STATUS_REJECTED)
                     buttons.extend([gr.update(visible=show), gr.update(visible=show)])
                 else:
                     buttons.extend([gr.update(), gr.update()])
 
-            # Images: only update the changed shot
+            # Images: only push a new value when the changed shot has one (avoid flicker)
             img_updates = []
             for i in range(n_panels):
                 if changed_shot is not None and i == changed_shot:
@@ -1325,8 +1421,12 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             # Stop render button visibility
             stop_btn = gr.update(visible=stop_btn_visible) if stop_btn_visible is not None else gr.update()
 
+            # State: use gr.update() (no-op) on final yield to preserve user approvals
+            state_out = gr.update() if preserve_state else sb_state
+
             return [
                 status_html,
+                state_out,
                 progress, next_btn, gr.update(),
                 *badges, *buttons, *img_updates,
                 gallery,
@@ -1377,67 +1477,65 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 )
                 return
             s = shots[shot_i]
-            raw_prompt = s.get("image_prompt") or s.get("beat") or ""
-            # Prepend character description from vision scan for consistency
-            char_desc = sb_state.get("character_vision_description", "")
-            if char_desc:
-                raw_prompt = f"{char_desc}. {raw_prompt}"
-            prompt = refine_single_prompt(raw_prompt, image_model, purpose="image")
-            print(f"[SmoothBrain] Shot {shot_i+1} image → {prompt[:120]}")
-
-            extra = {
-                "resolution": res_str,
-                "image_mode": 1,
-                "seed": s.get("seed", -1),
-            }
-            if char_ref:
-                # Wan/LTX/Hunyuan video models use image_start
-                # Qwen/Flux/Klein image models use image_refs array
-                model_lower = image_model.lower()
-                is_wan_family = any(model_lower.startswith(p) for p in
-                    ("wan", "i2v", "ti2v", "t2v", "ltx", "hunyuan", "hy_", "k5_"))
-                if is_wan_family:
-                    extra["image_start"] = char_ref
-                    extra["image_prompt_type"] = "S"
-                else:
-                    extra["image_refs"] = [char_ref]
-                    # Apply model-specific ref-mode overrides
-                    ref_overrides = get_image_ref_overrides(image_model)
-                    extra.update(ref_overrides)
-
-            task = self._build_task(prompt, image_model, extra)
-            s["status"] = STATUS_RENDERING
-
-            # Yield rendering status — update only this shot's badge
-            yield _yield_state(
-                f"<span style='color:var(--primary-400)'>"
-                f"🎨 <b>Rendering shot {shot_i+1}</b> ({task_idx+1}/{len(to_render)})..."
-                f"<br><small>Check terminal for live progress.</small></span>",
-                sb_state, changed_shot=shot_i,
-            )
-
-            before_ts = time.time()
             try:
-                success = self._run_render_tasks([task])
-            except Exception as e:
-                traceback.print_exc()
-                success = False
+                raw_prompt = s.get("image_prompt") or s.get("beat") or ""
+                # Prepend character description from vision scan for consistency
+                char_desc = sb_state.get("character_vision_description", "")
+                if char_desc:
+                    raw_prompt = f"{char_desc}. {raw_prompt}"
+                prompt = refine_single_prompt(raw_prompt, image_model, purpose="image")
+                print(f"[SmoothBrain] Shot {shot_i+1} image → {prompt[:120]}")
 
-            if success:
-                output_path = self._find_newest_output(since_ts=before_ts, output_type="image")
-                if output_path:
-                    # Copy to project folder
-                    project_dir = sb_state.get("project_dir", "")
-                    if project_dir:
-                        output_path = copy_to_project(output_path, project_dir, "images")
-                    s["ref_image_path"] = output_path
-                    s["status"] = STATUS_APPROVED if is_auto else STATUS_READY
-                    rendered += 1
-                    print(f"  Shot {shot_i+1} → {output_path}")
+                extra = {
+                    "resolution": res_str,
+                    "image_mode": 1,
+                    "seed": s.get("seed", -1),
+                }
+                if char_ref:
+                    model_lower = image_model.lower()
+                    is_wan_family = any(model_lower.startswith(p) for p in
+                        ("wan", "i2v", "ti2v", "t2v", "ltx", "hunyuan", "hy_", "k5_"))
+                    if is_wan_family:
+                        extra["image_start"] = char_ref
+                        extra["image_prompt_type"] = "S"
+                    else:
+                        extra["image_refs"] = [char_ref]
+                        ref_overrides = get_image_ref_overrides(image_model)
+                        extra.update(ref_overrides)
+
+                task = self._build_task(prompt, image_model, extra)
+                s["status"] = STATUS_RENDERING
+
+                # Yield rendering status
+                yield _yield_state(
+                    f"<span style='color:var(--primary-400)'>"
+                    f"🎨 <b>Rendering shot {shot_i+1}</b> ({task_idx+1}/{len(to_render)})..."
+                    f"<br><small>Check terminal for live progress.</small></span>",
+                    sb_state, changed_shot=shot_i,
+                )
+
+                before_ts = time.time()
+                success = self._run_render_tasks([task])
+
+                if success:
+                    output_path = self._find_newest_output(since_ts=before_ts, output_type="image")
+                    if output_path:
+                        project_dir = sb_state.get("project_dir", "")
+                        if project_dir:
+                            output_path = copy_to_project(output_path, project_dir, "images")
+                        s["ref_image_path"] = output_path
+                        s["status"] = STATUS_APPROVED if is_auto else STATUS_READY
+                        rendered += 1
+                        print(f"  Shot {shot_i+1} → {output_path}")
+                    else:
+                        s["status"] = STATUS_PENDING
                 else:
                     s["status"] = STATUS_PENDING
-            else:
+
+            except Exception as e:
+                traceback.print_exc()
                 s["status"] = STATUS_PENDING
+                print(f"[SmoothBrain] ❌ Shot {shot_i+1} failed: {e}")
 
             # Auto-save after each shot
             save_project(sb_state)
@@ -1453,7 +1551,8 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             status = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(to_render)} shot image(s) generated!</span>"
         else:
             status = "<span style='color:red'>❌ No images generated. Check terminal for errors.</span>"
-        yield _yield_state(status, sb_state, stop_btn_visible=False)
+        yield _yield_state(status, sb_state, stop_btn_visible=False, preserve_state=True)
+
 
     def _approve_shot(self, sb_state, shot_index):
         sb_state = dict(sb_state)
@@ -1498,7 +1597,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
     def _storyboard_panel_outputs(self):
         out = []
         for p in self.sb_storyboard_panels:
-            out.extend([p["group"], p["badge"], p["beat_md"], p["prompt_box"], p["char_assign"]])
+            out.extend([p["group"], p["badge"], p["beat_md"], p["prompt_box"], p["char_assign"], p["img"], p["approve_btn"], p["reject_btn"]])
         return out
 
     def _make_storyboard_updates(self, shots, shot_count, char_choices):
@@ -1510,12 +1609,20 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             beat = shots[i]["beat"] if i < len(shots) else ""
             prompt = shots[i].get("image_prompt", beat) if i < len(shots) else ""
             status = shots[i].get("status", STATUS_PENDING) if i < len(shots) else STATUS_PENDING
+            img_path = shots[i].get("ref_image_path") if i < len(shots) else None
+            # Validate the path exists on disk before passing to gr.Image
+            if img_path and not os.path.exists(img_path):
+                img_path = None
+            show_buttons = status in (STATUS_READY, STATUS_APPROVED, STATUS_REJECTED)
             updates.extend([
-                gr.update(visible=visible),
-                gr.update(value=self._shot_badge_html(i, status)),
-                gr.update(value=f"*{beat}*" if beat else ""),
-                gr.update(value=prompt, visible=visible),
-                gr.update(choices=char_choices, value=default_char),
+                gr.update(visible=visible),                              # group
+                gr.update(value=self._shot_badge_html(i, status)),      # badge
+                gr.update(value=f"*{beat}*" if beat else ""),           # beat_md
+                gr.update(value=prompt, visible=visible),               # prompt_box
+                gr.update(choices=char_choices, value=default_char),    # char_assign
+                gr.update(value=img_path, type="filepath") if img_path else gr.update(value=None),  # img
+                gr.update(visible=show_buttons),                        # approve_btn
+                gr.update(visible=show_buttons),                        # reject_btn
             ])
         return updates
 
@@ -1545,6 +1652,8 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             *self._all_vid_button_outputs(),
             *self._all_vid_video_outputs(),
             *self._all_vid_prompt_outputs(),
+            self.sb_stop_video_btn_top,
+            self.sb_stop_video_btn,
         ]
         self.sb_export_btn.click(
             fn=self._export_videos,
@@ -1581,11 +1690,16 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 ],
             )
 
-        # Stop video render button
+        # Stop video render buttons (top + bottom)
         self.sb_stop_video_btn.click(
             fn=self._stop_render,
             inputs=[],
             outputs=[self.sb_stop_video_btn],
+        )
+        self.sb_stop_video_btn_top.click(
+            fn=self._stop_render,
+            inputs=[],
+            outputs=[self.sb_stop_video_btn_top],
         )
 
         # New project
@@ -1639,8 +1753,15 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         return gr.update(value=files)
 
     def _enter_step4(self, sb_state):
-        """Navigate to Step 4 and populate video cards."""
+        """Navigate to Step 4: auto-approve all READY shots, then populate video cards."""
         sb_state = dict(sb_state)
+        shots = [dict(s) for s in sb_state.get("shots", [])]
+        shot_count = sb_state.get("shot_count", 6)
+        # Auto-approve any shot that has an image but hasn't been manually approved/rejected
+        for s in shots[:shot_count]:
+            if s.get("ref_image_path") and s.get("status") not in (STATUS_APPROVED, STATUS_REJECTED):
+                s["status"] = STATUS_APPROVED
+        sb_state["shots"] = shots
         sb_state["current_step"] = 4
         save_project(sb_state)
         step_updates = list(self._step_visibility(4))
@@ -1757,6 +1878,18 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         resolution = sb_state.get("resolution", "480p")
         n_panels = len(self.sb_video_panels)
 
+        # Auto-select fastest speed profile for this video model
+        profile_params = {}
+        try:
+            profile = self._get_fastest_profile(video_model)
+            if profile:
+                profile_params = profile.get("params", {})
+                print(f"[SmoothBrain] ⚡ Auto-selected speed profile: {profile['name']}")
+            else:
+                print(f"[SmoothBrain] No speed profiles found for {video_model}, using defaults")
+        except Exception as e:
+            print(f"[SmoothBrain] Profile scan failed: {e}")
+
         # Video status constants (reuse image ones)
         V_PENDING = STATUS_PENDING
         V_RENDERING = STATUS_RENDERING
@@ -1764,7 +1897,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         V_APPROVED = STATUS_APPROVED
         V_REJECTED = STATUS_REJECTED
 
-        def _yield_state(status_html, sb_state, changed_shot=None):
+        def _yield_state(status_html, sb_state, changed_shot=None, stop_btn_visible=None):
             """Build output — only update specific shot's card."""
             approved = sum(1 for s in shots[:shot_count]
                            if s.get("video_status") == V_APPROVED)
@@ -1795,12 +1928,17 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 else:
                     vid_updates.append(gr.update())
 
-            prompt_updates = [gr.update()] * n_panels  # Don't touch prompts mid-render
+            prompt_updates = [gr.update()] * n_panels
+
+            # Stop button visibility
+            stop_top = gr.update(visible=stop_btn_visible) if stop_btn_visible is not None else gr.update()
+            stop_bot = gr.update(visible=stop_btn_visible) if stop_btn_visible is not None else gr.update()
 
             return [
                 status_html,
                 sb_state, progress,
                 *badges, *buttons, *vid_updates, *prompt_updates,
+                stop_top, stop_bot,
             ]
 
         if not shots:
@@ -1834,6 +1972,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                         params = build_video_params(shot_obj, video_model, shot_duration, vibe, defaults)
                         res_str = VIDEO_RESOLUTION.get(vibe, {}).get(resolution, "832x480")
                         params["resolution"] = res_str
+                        # Apply speed profile params (accelerator lora, step count, etc.)
+                        if profile_params:
+                            params.update(profile_params)
                         ref_path = s.get("ref_image_path")
                         if ref_path and os.path.exists(ref_path):
                             params["image_start"] = ref_path
@@ -1852,7 +1993,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         # Yield initial
         yield _yield_state(
             f"<span style='color:var(--primary-400)'>⏳ Rendering 0/{len(to_render)} videos...</span>",
-            sb_state,
+            sb_state, stop_btn_visible=True,
         )
 
         for task_idx, (shot_i, prompt, params) in enumerate(to_render):
@@ -1860,7 +2001,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             if self._render_cancelled:
                 yield _yield_state(
                     f"<span style='color:orange'>🛑 Render stopped. {rendered}/{len(to_render)} videos completed.</span>",
-                    sb_state,
+                    sb_state, stop_btn_visible=False,
                 )
                 return
             s = shots[shot_i]
@@ -1912,7 +2053,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             status = f"<span style='color:var(--primary-500)'>✅ {rendered}/{len(to_render)} video(s) rendered!</span>"
         else:
             status = "<span style='color:red'>❌ No videos generated. Check terminal for errors.</span>"
-        yield _yield_state(status, sb_state)
+        yield _yield_state(status, sb_state, stop_btn_visible=False)
 
     def _new_project(self):
         clear_session()
