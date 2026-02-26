@@ -1,11 +1,17 @@
 # Smooth Brain — Ollama Integration
 # Port of TronikSlate/app/server/routes/ollama.ts
-# Handles model detection, prompt packing, and prompt refinement.
+# Handles model detection, prompt packing, prompt refinement, and auto-setup.
 
 from __future__ import annotations
 import json
+import os
 import re
+import shutil
+import subprocess
+import sys
+import threading
 import time
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 try:
@@ -32,6 +38,234 @@ PREFERRED_MODELS = [
 
 _cached_model: Optional[str] = None
 
+# ── Auto-setup state ─────────────────────────────────────────────────────────
+# Status values: "" (idle), "checking", "downloading", "installing",
+#                "starting", "pulling", "ready", "failed:<reason>"
+_setup_status: str = ""
+_setup_lock = threading.Lock()
+_setup_done = threading.Event()
+_ollama_process: Optional[subprocess.Popen] = None
+
+# Official download URLs
+_OLLAMA_WINDOWS_URL = "https://ollama.com/download/OllamaSetup.exe"
+_OLLAMA_LINUX_CMD = "curl -fsSL https://ollama.com/install.sh | sh"
+
+
+def setup_status() -> str:
+    """Return current auto-setup status string."""
+    return _setup_status
+
+
+def _set_status(s: str):
+    global _setup_status
+    _setup_status = s
+    print(f"[smooth_brain/ollama] setup: {s}")
+
+
+def _find_ollama() -> Optional[str]:
+    """Find ollama executable on the system."""
+    found = shutil.which("ollama")
+    if found:
+        return found
+    if sys.platform == "win32":
+        for base in [
+            os.environ.get("LOCALAPPDATA", ""),
+            os.environ.get("PROGRAMFILES", ""),
+        ]:
+            if not base:
+                continue
+            for sub in [
+                os.path.join("Programs", "Ollama", "ollama.exe"),
+                os.path.join("Ollama", "ollama.exe"),
+            ]:
+                p = os.path.join(base, sub)
+                if os.path.isfile(p):
+                    return p
+    else:
+        for p in ["/usr/local/bin/ollama", "/usr/bin/ollama"]:
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def _download_ollama_windows() -> Optional[str]:
+    """Download Ollama installer for Windows. Returns path to .exe or None."""
+    tmp_dir = os.path.join(os.environ.get("TEMP", "/tmp"), "smooth_brain_ollama")
+    os.makedirs(tmp_dir, exist_ok=True)
+    installer_path = os.path.join(tmp_dir, "OllamaSetup.exe")
+    if os.path.isfile(installer_path) and os.path.getsize(installer_path) > 1_000_000:
+        return installer_path
+    try:
+        print(f"[smooth_brain/ollama] Downloading Ollama from {_OLLAMA_WINDOWS_URL}...")
+        urllib.request.urlretrieve(_OLLAMA_WINDOWS_URL, installer_path)
+        if os.path.isfile(installer_path) and os.path.getsize(installer_path) > 1_000_000:
+            return installer_path
+    except Exception as e:
+        print(f"[smooth_brain/ollama] Download failed: {e}")
+    return None
+
+
+def _install_ollama_windows(installer_path: str) -> bool:
+    """Run Ollama installer silently. Returns True on success."""
+    try:
+        subprocess.run(
+            [installer_path, "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"],
+            timeout=300,
+            capture_output=True,
+        )
+        time.sleep(3)
+        return _find_ollama() is not None
+    except Exception as e:
+        print(f"[smooth_brain/ollama] Install failed: {e}")
+        return False
+
+
+def _install_ollama_linux() -> bool:
+    """Install Ollama on Linux via official script."""
+    try:
+        subprocess.run(
+            ["bash", "-c", _OLLAMA_LINUX_CMD],
+            timeout=300,
+            capture_output=True,
+        )
+        time.sleep(2)
+        return _find_ollama() is not None
+    except Exception as e:
+        print(f"[smooth_brain/ollama] Linux install failed: {e}")
+        return False
+
+
+def _start_ollama_server(ollama_path: str) -> bool:
+    """Start 'ollama serve' in background. Returns True if server comes online."""
+    global _ollama_process
+    if is_online():
+        return True
+    try:
+        if sys.platform == "win32":
+            _ollama_process = subprocess.Popen(
+                [ollama_path, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+            )
+        else:
+            _ollama_process = subprocess.Popen(
+                [ollama_path, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        for _ in range(60):
+            time.sleep(0.5)
+            if is_online():
+                return True
+        print("[smooth_brain/ollama] Server started but not responding after 30s")
+    except Exception as e:
+        print(f"[smooth_brain/ollama] Failed to start server: {e}")
+    return False
+
+
+def _pull_model(ollama_path: str, model: str = DEFAULT_MODEL) -> bool:
+    """Pull a model using 'ollama pull'. Returns True on success."""
+    try:
+        print(f"[smooth_brain/ollama] Pulling model {model}...")
+        result = subprocess.run(
+            [ollama_path, "pull", model],
+            timeout=600,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"[smooth_brain/ollama] Model {model} pulled successfully")
+            return True
+        print(f"[smooth_brain/ollama] Pull failed: {result.stderr[:200]}")
+    except subprocess.TimeoutExpired:
+        print(f"[smooth_brain/ollama] Pull timed out for {model}")
+    except Exception as e:
+        print(f"[smooth_brain/ollama] Pull error: {e}")
+    return False
+
+
+def _has_any_model() -> bool:
+    """Check if Ollama has at least one model installed."""
+    return detect_model() is not None
+
+
+def ensure_ollama() -> dict:
+    """Ensure Ollama is installed, running, and has a model.
+    Designed to be called from a background thread.
+    Returns status dict {online, model_ready, status}.
+    """
+    with _setup_lock:
+        # Already online with a model? Done.
+        if is_online() and _has_any_model():
+            _set_status("ready")
+            _setup_done.set()
+            return {"online": True, "model_ready": True, "status": "ready"}
+
+        # Step 1: Find or install Ollama
+        _set_status("checking")
+        ollama_path = _find_ollama()
+
+        if not ollama_path:
+            _set_status("downloading")
+            if sys.platform == "win32":
+                installer = _download_ollama_windows()
+                if not installer:
+                    _set_status("failed:download")
+                    _setup_done.set()
+                    return {"online": False, "model_ready": False, "status": "failed:download"}
+                _set_status("installing")
+                if not _install_ollama_windows(installer):
+                    _set_status("failed:install")
+                    _setup_done.set()
+                    return {"online": False, "model_ready": False, "status": "failed:install"}
+            else:
+                _set_status("installing")
+                if not _install_ollama_linux():
+                    _set_status("failed:install")
+                    _setup_done.set()
+                    return {"online": False, "model_ready": False, "status": "failed:install"}
+
+            ollama_path = _find_ollama()
+            if not ollama_path:
+                _set_status("failed:notfound")
+                _setup_done.set()
+                return {"online": False, "model_ready": False, "status": "failed:notfound"}
+
+        # Step 2: Start server if not running
+        if not is_online():
+            _set_status("starting")
+            if not _start_ollama_server(ollama_path):
+                _set_status("failed:start")
+                _setup_done.set()
+                return {"online": False, "model_ready": False, "status": "failed:start"}
+
+        # Step 3: Pull default model if needed
+        if not _has_any_model():
+            _set_status("pulling")
+            if not _pull_model(ollama_path, DEFAULT_MODEL):
+                _set_status("failed:pull")
+                _setup_done.set()
+                return {"online": True, "model_ready": False, "status": "failed:pull"}
+
+        _set_status("ready")
+        _setup_done.set()
+        clear_model_cache()
+        return {"online": True, "model_ready": True, "status": "ready"}
+
+
+def ensure_ollama_background() -> None:
+    """Start Ollama auto-setup in a background thread (non-blocking)."""
+    if _setup_done.is_set() and _setup_status == "ready":
+        return
+    if _setup_status and _setup_status not in ("", "failed:download", "failed:install",
+                                                 "failed:start", "failed:pull", "failed:notfound"):
+        return  # Already in progress
+    t = threading.Thread(target=ensure_ollama, daemon=True, name="ollama-setup")
+    t.start()
+
+
+# ── HTTP client ──────────────────────────────────────────────────────────────
 
 def _client() -> "httpx.Client":
     return httpx.Client(base_url=OLLAMA_BASE, timeout=TIMEOUT)
@@ -177,7 +411,6 @@ def describe_character_image(image_path: str) -> Optional[str]:
     except Exception:
         return None
 
-    # Try vision-capable models in preference order
     model_name = get_model_name()
     system = (
         "You are a visual description specialist. Describe the character in this image in detail. "

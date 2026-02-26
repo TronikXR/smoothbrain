@@ -18,7 +18,11 @@ from typing import Any, Dict, List, Optional
 import gradio as gr
 from shared.utils.plugins import WAN2GPPlugin
 
-from .ollama import pack as ollama_pack, get_status as ollama_status, is_online, refine_single_prompt, describe_character_image
+from .ollama import (
+    pack as ollama_pack, get_status as ollama_status, is_online,
+    refine_single_prompt, describe_character_image,
+    ensure_ollama_background, setup_status as ollama_setup_status,
+)
 from .state import (
     SmoothBrainSession, ShotState,
     save_session, load_session, clear_session,
@@ -136,6 +140,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             with gr.Row():
                 gr.HTML(f"<b>{PLUGIN_NAME}</b> &nbsp;|&nbsp; One-click short film generation", elem_id="sb-step-header")
                 self.sb_ollama_badge = gr.HTML(self._get_ollama_badge())
+
+            # Kick off Ollama auto-setup in background
+            ensure_ollama_background()
 
             # ── Shared state ───────────────────────────────────────────────
             self.sb_state = gr.State(self._default_state())
@@ -2095,6 +2102,8 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             _self_mod.ollama_status = _ollama_mod.get_status
             _self_mod.is_online = _ollama_mod.is_online
             _self_mod.refine_single_prompt = _ollama_mod.refine_single_prompt
+            _self_mod.ensure_ollama_background = _ollama_mod.ensure_ollama_background
+            _self_mod.ollama_setup_status = _ollama_mod.setup_status
         except Exception as e:
             errors.append(f"re-import: {e}")
 
@@ -2124,6 +2133,27 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         }
 
     def _get_ollama_badge(self) -> str:
+        # Check live setup status first
+        ss = ollama_setup_status()
+        if ss and ss.startswith("failed:"):
+            reason = ss.split(":", 1)[1]
+            return (
+                f"<span style='color:red;font-size:12px'>"
+                f"🔴 Ollama setup failed: {reason}</span>"
+            )
+        if ss in ("downloading", "installing", "starting", "pulling", "checking"):
+            labels = {
+                "checking": "🔵 Checking Ollama...",
+                "downloading": "⬇️ Downloading Ollama...",
+                "installing": "📦 Installing Ollama...",
+                "starting": "🚀 Starting Ollama...",
+                "pulling": f"⬇️ Pulling AI model...",
+            }
+            return (
+                f"<span style='color:var(--primary-400);font-size:12px'>"
+                f"{labels.get(ss, ss)}</span>"
+            )
+        # Normal status check
         status = ollama_status()
         if status.get("online") and status.get("model_ready"):
             model = status.get("active_model", "")
