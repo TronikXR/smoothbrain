@@ -11,29 +11,58 @@ Adds a **"🧠 Smooth Brain"** tab to Wan2GP that walks you through a 4-step wiz
 | **1. Story Setup** | Enter a concept, set genre sliders, pick your models. Hit **Roll** — AI generates cinematic shot beats. |
 | **2. Characters** | Upload up to 4 character reference images (optional). |
 | **3. Storyboard** | Preview shots. Click **Generate All Images** to queue image renders via your loaded image model. |
-| **4. Export** | Set shot duration, click **Export All Videos** — each shot queues into Wan2GP's render pipeline. |
+| **4. Videos** | Set shot duration, click **Process Videos** — each shot queues into Wan2GP's render pipeline with auto-selected speed profiles. |
 
 ## AI Integration
 
-The plugin calls **Ollama** (if running at `localhost:11434`) for:
+The plugin uses **Ollama** for AI-powered story generation and prompt refinement.
+
+> **Ollama auto-installs!** If Ollama isn't found on your system, the plugin automatically downloads, installs, and starts it in the background. It also pulls the default `qwen2.5:3b` model. No manual setup needed.
+
+When Ollama is running, the plugin uses it for:
 - **Story beat generation** — creates a cinematic shot list from your concept
 - **Prompt refinement** — rewrites prompts for your chosen image and video models (LTX-2, Wan, HunyuanVideo)
 
-If Ollama is offline, it silently falls back to built-in story templates (8 genres).
+If Ollama is unavailable, it silently falls back to built-in story templates (8 genres).
+
+---
 
 ## Installation
 
-In Wan2GP, go to **Plugins → Install Plugin** and enter:
+### Option 1: Wan2GP Plugin Manager (Recommended)
+
+1. Open Wan2GP and navigate to **Settings → Plugins**
+2. In the **"Discover & Install"** section on the right, select **"GitHub URL"**
+3. Paste the following URL:
+
 ```
-https://github.com/hoodtronik/smooth-brain-wan2gp
+https://github.com/TronikXR/smoothbrain
 ```
 
-Or clone manually into `app/plugins/smooth_brain/` and restart Wan2GP.
+4. Click **"Download and Install from URL"**
+5. Click **"Save and Restart"**
 
-Install the Python dependency:
+![Wan2GP Plugin Manager — paste the GitHub URL and click Download and Install](docs/plugin_manager_install.png)
+
+### Option 2: Manual Git Clone
+
+1. Open a terminal and navigate to your Wan2GP plugins folder:
+
 ```bash
-uv pip install httpx
+cd /path/to/wan2gp/app/plugins
 ```
+
+2. Clone the repository:
+
+```bash
+git clone https://github.com/TronikXR/smoothbrain.git smooth_brain
+```
+
+3. Restart Wan2GP
+
+> **Note:** The folder must be named `smooth_brain` (with underscore) inside the `app/plugins/` directory.
+
+---
 
 ## Models Supported
 
@@ -53,11 +82,14 @@ Any model available in your Wan2GP installation. Optimized prompting guides incl
 smooth_brain/
 ├── __init__.py          # Package marker
 ├── plugin.py            # Main Gradio UI (WAN2GPPlugin subclass)
-├── ollama.py            # Ollama pack/refine pipeline
+├── ollama.py            # Ollama auto-setup + pack/refine pipeline
+├── model_scanner.py     # Video/image model & speed profile scanner
 ├── prompt_guides.py     # Model-specific prompting guides
 ├── story_templates.py   # Offline fallback story templates (8 genres)
 ├── state.py             # Session state + render param builder
+├── gpu_utils.py         # GPU detection & VRAM info
 ├── plugin_info.json     # Wan2GP metadata
+├── docs/                # Screenshots for README
 └── requirements.txt     # httpx
 ```
 
