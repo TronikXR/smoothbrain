@@ -183,7 +183,8 @@ def _resolve_model_urls(model_data: dict, defaults_dir: str) -> list[str]:
                 with open(ref_path, encoding="utf-8") as f:
                     ref_data = json.load(f)
                 urls = ref_data.get("model", {}).get("URLs", [])
-            except Exception:
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[model_scanner] Failed to resolve model ref '{urls}': {e}")
                 urls = []
         else:
             urls = []
@@ -231,7 +232,8 @@ def _scan_folder(folder: str, source: str) -> list[dict]:
                 "description": mb.get("description", ""),
                 "_data": data,  # keep raw data for URL resolution
             })
-        except Exception:
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[model_scanner] Skipping {fname}: {e}")
             continue
     return models
 
@@ -322,7 +324,8 @@ def scan_image_models() -> list[dict]:
                         "architecture": arch,
                         "source": source,
                     })
-            except Exception:
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[model_scanner] Skipping image model {fname}: {e}")
                 continue
     return installed
 

@@ -24,12 +24,10 @@ from .ollama import (
     ensure_ollama_background, setup_status as ollama_setup_status,
 )
 from .state import (
-    SmoothBrainSession, ShotState,
-    save_session, load_session, clear_session,
-    build_video_params, is_ltx_model, vibe_to_resolution,
-    duration_to_frames, session_age_minutes,
-    create_project_dir, save_project, load_project,
-    list_recent_projects, copy_to_project, scan_project_gallery,
+    save_project, load_project, is_ltx_model, vibe_to_resolution,
+    duration_to_frames,
+    create_project_dir, copy_to_project,
+    list_recent_projects, scan_project_gallery,
 )
 from .story_templates import ALL_GENRES
 from .model_scanner import (

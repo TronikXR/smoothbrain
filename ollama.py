@@ -331,19 +331,19 @@ def clear_model_cache() -> None:
 def _extract_json(text: str) -> Optional[Any]:
     try:
         return json.loads(text.strip())
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         pass
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if m:
         try:
             return json.loads(m.group(1).strip())
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             pass
     m2 = re.search(r"\{[\s\S]*\}", text)
     if m2:
         try:
             return json.loads(m2.group(0))
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             pass
     return None
 
@@ -353,7 +353,7 @@ def _extract_json_array(text: str) -> Optional[List[Any]]:
         result = json.loads(text.strip())
         if isinstance(result, list):
             return result
-    except Exception:
+    except (json.JSONDecodeError, ValueError):
         pass
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if m:
@@ -361,7 +361,7 @@ def _extract_json_array(text: str) -> Optional[List[Any]]:
             result = json.loads(m.group(1).strip())
             if isinstance(result, list):
                 return result
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             pass
     m2 = re.search(r"\[[\s\S]*\]", text)
     if m2:
@@ -369,7 +369,7 @@ def _extract_json_array(text: str) -> Optional[List[Any]]:
             result = json.loads(m2.group(0))
             if isinstance(result, list):
                 return result
-        except Exception:
+        except (json.JSONDecodeError, ValueError):
             pass
     return None
 

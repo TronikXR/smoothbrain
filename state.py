@@ -142,10 +142,19 @@ def save_project(sb_state: dict, project_dir: str = "") -> None:
         data = dict(sb_state)
         data["saved_at"] = time.time()
         path = os.path.join(project_dir, "project.json")
-        with open(path, "w", encoding="utf-8") as f:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, default=str)
+        os.replace(tmp, path)  # atomic on same filesystem
     except Exception as e:
         print(f"[smooth_brain] save_project failed: {e}")
+        # Clean up temp file if it exists
+        try:
+            tmp = os.path.join(project_dir, "project.json.tmp")
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
 
 
 def load_project(project_dir: str) -> Optional[dict]:
