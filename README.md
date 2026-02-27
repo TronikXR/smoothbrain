@@ -1,5 +1,7 @@
 # 🧠 Smooth Brain — Wan2GP Plugin
 
+> ⚠️ **Alpha Release** — This plugin is in active development. Core features work but expect bugs and breaking changes. Feedback and bug reports welcome!
+
 AI-powered one-click short film generation for [Wan2GP](https://github.com/deepbeepmeep/Wan2GP).
 
 ## What It Does
