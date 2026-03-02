@@ -3,6 +3,7 @@
 # Handles model detection, prompt packing, prompt refinement, and auto-setup.
 
 from __future__ import annotations
+import hashlib
 import json
 import os
 import platform
@@ -55,6 +56,18 @@ def _set_status(s: str):
     global _setup_status
     _setup_status = s
     print(f"[smooth_brain/ollama] setup: {s}")
+
+
+def _file_sha256(filepath: str) -> str:
+    """Calculate SHA256 hash of a file."""
+    sha256 = hashlib.sha256()
+    try:
+        with open(filepath, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+    except Exception:
+        return ""
 
 
 def _find_ollama() -> Optional[str]:
@@ -112,6 +125,8 @@ def _download_ollama_windows() -> Optional[str]:
         print(f"[smooth_brain/ollama] Downloading Ollama from {_OLLAMA_WINDOWS_URL}...")
         urllib.request.urlretrieve(_OLLAMA_WINDOWS_URL, installer_path)
         if os.path.isfile(installer_path) and os.path.getsize(installer_path) > 1_000_000:
+            sha = _file_sha256(installer_path)
+            print(f"[smooth_brain/ollama] Downloaded Ollama Setup (SHA256: {sha[:12]}...)")
             return installer_path
         print(f"[smooth_brain/ollama] Downloaded file too small or missing: {installer_path}")
     except Exception as e:
@@ -163,6 +178,8 @@ def _download_ollama_linux() -> Optional[str]:
         print(f"[smooth_brain/ollama] Downloading Ollama ({ollama_arch}) from {url}...")
         urllib.request.urlretrieve(url, ollama_path)
         if os.path.isfile(ollama_path) and os.path.getsize(ollama_path) > 1_000_000:
+            sha = _file_sha256(ollama_path)
+            print(f"[smooth_brain/ollama] Downloaded Ollama binary (SHA256: {sha[:12]}...)")
             os.chmod(ollama_path, 0o755)
             return ollama_path
     except Exception as e:
@@ -380,6 +397,19 @@ def clear_model_cache() -> None:
     _cached_model = None
 
 
+# ── Sanitization helpers ──────────────────────────────────────────────────────
+
+def sanitize_prompt(text: str) -> str:
+    """Sanitize user input to prevent prompt injection and formatting issues."""
+    if not text:
+        return ""
+    # Remove triple backticks which can break JSON/Markdown parsing in LLM response
+    text = text.replace("```", "")
+    # Remove excessive newlines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 # ── JSON extraction helpers ───────────────────────────────────────────────────
 
 def _extract_json(text: str) -> Optional[Any]:
@@ -561,6 +591,7 @@ def refine_single_prompt(
     model_id: str,
     purpose: str = "image",
 ) -> str:
+    raw_prompt = sanitize_prompt(raw_prompt)
     """Apply model-specific prompt guide to a single prompt at render time.
 
     Args:
@@ -625,6 +656,7 @@ def pack(
 
     Falls back to template-based beats if Ollama is offline.
     """
+    concept = sanitize_prompt(concept)
     count = max(2, min(shot_count, 20))
     weights = genre_weights or {"action": 50}
 
@@ -633,7 +665,7 @@ def pack(
         return _fallback_shots(concept, weights, count)
 
     # ── Step 1: Generate story beat list ────────────────────────────────────
-    if concept.strip():
+    if concept:
         story_input = f'Subject/theme: "{concept}".\nInvent a compelling short story around this subject, then break it into shots.'
     else:
         story_input = "Invent a completely original, surprising, and visually stunning short story. Be creative and unexpected. Break it into shots."

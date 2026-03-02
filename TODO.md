@@ -20,7 +20,6 @@ Tracked fixes and improvements from the Feb 27, 2026 code review.
   - [ ] Extract `wiring.py` — `_wire_step1` through `_wire_step4`, `_wire_navigation`, approve/reject handlers (~400 lines)
 - [ ] **Fix output attribution** — replace mtime-based `_find_newest_output()` with task-ID or per-shot output dirs
 - [ ] **Structured logging** — replace ~40 `print()` calls with `logging` module
-- [ ] **Pin httpx** — `httpx>=0.27,<1.0` in `requirements.txt`
 - [ ] **Filename collision fix** — `copy_to_project` uses `uuid4` or loop-until-unique instead of `int(time.time())`
 - [ ] **Add test suite** — pure-function tests, no GPU needed:
   - [ ] `test_state.py` — save/load roundtrip, copy collision handling
