@@ -92,7 +92,6 @@ smooth_brain/
 ├── gpu_utils.py         # GPU detection & VRAM info
 ├── plugin_info.json     # Wan2GP metadata
 ├── docs/                # Screenshots for README
-└── requirements.txt     # httpx
 ```
 
 ## API — Programmatic Access
