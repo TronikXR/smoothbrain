@@ -75,7 +75,9 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         self._video_models: List[dict] = []
         self._image_models: List[dict] = []
         self._gpu_info: dict = {"name": "Unknown", "vram_mb": 0}
-        self._render_cancelled = False
+        self._char_render_cancelled = False
+        self._image_render_cancelled = False
+        self._video_render_cancelled = False
 
     # ── Plugin registration ──────────────────────────────────────────────────
 
@@ -916,7 +918,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         )
         # Stop character render button
         self.sb_char_stop_btn.click(
-            fn=self._stop_render,
+            fn=self._stop_char_render,
             inputs=[],
             outputs=[self.sb_char_stop_btn],
         )
@@ -1104,6 +1106,8 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         if not image_model:
             yield "<span style='color:orange'>⚠️ No image model. Set one in Step 1.</span>", gr.update(visible=False), gr.update(), gr.update()
             return
+
+        self._char_render_cancelled = False
         try:
             # Phase 1: Refine prompt — show stop button
             yield (
@@ -1135,6 +1139,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 gr.update(),
                 gr.update(),
             )
+            if self._char_render_cancelled:
+                yield "<span style='color:orange'>🛑 Character generation stopped.</span>", gr.update(visible=False), gr.update(), gr.update()
+                return
+
             success = self._run_render_tasks([task])
 
             if success:
@@ -1240,7 +1248,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         )
         # Stop render button
         self.sb_stop_render_btn.click(
-            fn=self._stop_render,
+            fn=self._stop_image_render,
             inputs=[],
             outputs=[self.sb_stop_render_btn],
         )
@@ -1473,7 +1481,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
         sb_state["resolution"] = resolution
         rendered = 0
-        self._render_cancelled = False
+        self._image_render_cancelled = False
 
         # Yield initial progress — show stop button
         yield _yield_state(
@@ -1483,7 +1491,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
         for task_idx, shot_i in enumerate(to_render):
             # Check for cancellation
-            if self._render_cancelled:
+            if self._image_render_cancelled:
                 yield _yield_state(
                     f"<span style='color:orange'>🛑 Render stopped. {rendered}/{len(to_render)} shots completed.</span>",
                     sb_state, stop_btn_visible=False,
@@ -1578,10 +1586,22 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         progress, next_btn, badges, buttons = self._build_status_updates(sb_state)
         return [sb_state, progress, next_btn, *badges, *buttons]
 
-    def _stop_render(self):
-        """Signal the running generator to stop after the current shot."""
-        self._render_cancelled = True
-        print("[SmoothBrain] 🛑 Render cancellation requested")
+    def _stop_char_render(self):
+        """Signal character generation to stop."""
+        self._char_render_cancelled = True
+        print("[SmoothBrain] 🛑 Character render cancellation requested")
+        return gr.update(visible=False)
+
+    def _stop_image_render(self):
+        """Signal image rendering to stop."""
+        self._image_render_cancelled = True
+        print("[SmoothBrain] 🛑 Image render cancellation requested")
+        return gr.update(visible=False)
+
+    def _stop_video_render(self):
+        """Signal video rendering to stop."""
+        self._video_render_cancelled = True
+        print("[SmoothBrain] 🛑 Video render cancellation requested")
         return gr.update(visible=False)
 
     def _reject_shot(self, sb_state, shot_index):
@@ -1705,12 +1725,12 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
         # Stop video render buttons (top + bottom)
         self.sb_stop_video_btn.click(
-            fn=self._stop_render,
+            fn=self._stop_video_render,
             inputs=[],
             outputs=[self.sb_stop_video_btn],
         )
         self.sb_stop_video_btn_top.click(
-            fn=self._stop_render,
+            fn=self._stop_video_render,
             inputs=[],
             outputs=[self.sb_stop_video_btn_top],
         )
@@ -2001,7 +2021,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             return
 
         rendered = 0
-        self._render_cancelled = False
+        self._video_render_cancelled = False
 
         # Yield initial
         yield _yield_state(
@@ -2011,7 +2031,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
 
         for task_idx, (shot_i, prompt, params) in enumerate(to_render):
             # Check for cancellation
-            if self._render_cancelled:
+            if self._video_render_cancelled:
                 yield _yield_state(
                     f"<span style='color:orange'>🛑 Render stopped. {rendered}/{len(to_render)} videos completed.</span>",
                     sb_state, stop_btn_visible=False,

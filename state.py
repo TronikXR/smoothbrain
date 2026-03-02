@@ -222,12 +222,20 @@ def copy_to_project(src_path: str, project_dir: str, subfolder: str) -> str:
     dest_dir = os.path.join(project_dir, subfolder)
     os.makedirs(dest_dir, exist_ok=True)
     basename = os.path.basename(src_path)
+    name, ext = os.path.splitext(basename)
     dest = os.path.join(dest_dir, basename)
-    # Avoid overwriting — add timestamp prefix
+
+    # Avoid overwriting — add unique suffix if exists
     if os.path.exists(dest):
+        counter = 1
         ts = int(time.time())
-        name, ext = os.path.splitext(basename)
-        dest = os.path.join(dest_dir, f"{name}_{ts}{ext}")
+        while True:
+            suffix = f"_{ts}_{counter}" if counter > 1 else f"_{ts}"
+            dest = os.path.join(dest_dir, f"{name}{suffix}{ext}")
+            if not os.path.exists(dest):
+                break
+            counter += 1
+
     try:
         shutil.copy2(src_path, dest)
         return dest

@@ -66,7 +66,8 @@ def _file_sha256(filepath: str) -> str:
             for chunk in iter(lambda: f.read(4096), b""):
                 sha256.update(chunk)
         return sha256.hexdigest()
-    except Exception:
+    except (OSError, IOError) as e:
+        print(f"[smooth_brain/ollama] Failed to calculate SHA256 for {filepath}: {e}")
         return ""
 
 
@@ -351,18 +352,16 @@ def _http_request(method: str, path: str, data: Optional[Dict] = None, timeout: 
 
 
 def is_online() -> bool:
-    try:
-        return _http_request("GET", "/api/tags", timeout=5.0) is not None
-    except Exception:
-        return False
+    """Check if Ollama server is responsive."""
+    return _http_request("GET", "/api/tags", timeout=5.0) is not None
 
 
 def detect_model() -> Optional[str]:
     """Scan installed Ollama models and return the best one. None if none found."""
+    data = _http_request("GET", "/api/tags", timeout=5.0)
+    if not data:
+        return None
     try:
-        data = _http_request("GET", "/api/tags", timeout=5.0)
-        if not data:
-            return None
         models: List[str] = [m["name"] for m in data.get("models", [])]
         if not models:
             return None
@@ -374,9 +373,9 @@ def detect_model() -> Optional[str]:
             )
             if match:
                 return match
-        return None
-    except Exception:
-        return None
+    except (KeyError, TypeError) as e:
+        print(f"[smooth_brain/ollama] Unexpected response format in detect_model: {e}")
+    return None
 
 
 def get_model_name() -> str:
@@ -490,7 +489,8 @@ def describe_character_image(image_path: str) -> Optional[str]:
     try:
         with open(image_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("utf-8")
-    except Exception:
+    except (OSError, IOError) as e:
+        print(f"[smooth_brain/ollama] Failed to read character image {image_path}: {e}")
         return None
 
     model_name = get_model_name()
@@ -524,6 +524,7 @@ def describe_character_image(image_path: str) -> Optional[str]:
 
 def _fallback_shots(concept: str, genre_weights: Dict[str, int], shot_count: int) -> List[Dict]:
     """Generate shots from templates when Ollama is offline."""
+    concept = sanitize_prompt(concept)
     templates = get_weighted_templates(genre_weights, count=1)
     template = templates[0] if templates else TEMPLATES[0]
     beats = fill_template(template, concept or "the hero", shot_count)
