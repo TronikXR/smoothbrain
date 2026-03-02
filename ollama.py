@@ -61,7 +61,7 @@ def _find_ollama() -> Optional[str]:
     """Find ollama executable on the system."""
     # 1. Check for local binary in smooth_brain/bin/
     plugin_root = os.path.dirname(os.path.abspath(__file__))
-    local_bin = os.path.join(plugin_root, "bin", "ollama.exe" if sys.platform == "win32" else "ollama")
+    local_bin = os.path.normpath(os.path.join(plugin_root, "bin", "ollama.exe" if sys.platform == "win32" else "ollama"))
     if os.path.isfile(local_bin):
         return local_bin
 
@@ -94,16 +94,26 @@ def _find_ollama() -> Optional[str]:
 
 def _download_ollama_windows() -> Optional[str]:
     """Download Ollama installer for Windows. Returns path to .exe or None."""
-    tmp_dir = os.path.join(os.environ.get("TEMP", "/tmp"), "smooth_brain_ollama")
-    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_dir = os.path.normpath(os.path.join(os.environ.get("TEMP", "/tmp"), "smooth_brain_ollama"))
+    try:
+        os.makedirs(tmp_dir, exist_ok=True)
+        if not os.access(tmp_dir, os.W_OK):
+            print(f"[smooth_brain/ollama] Temporary directory not writable: {tmp_dir}")
+            return None
+    except Exception as e:
+        print(f"[smooth_brain/ollama] Failed to create temp dir {tmp_dir}: {e}")
+        return None
+
     installer_path = os.path.join(tmp_dir, "OllamaSetup.exe")
     if os.path.isfile(installer_path) and os.path.getsize(installer_path) > 1_000_000:
         return installer_path
+
     try:
         print(f"[smooth_brain/ollama] Downloading Ollama from {_OLLAMA_WINDOWS_URL}...")
         urllib.request.urlretrieve(_OLLAMA_WINDOWS_URL, installer_path)
         if os.path.isfile(installer_path) and os.path.getsize(installer_path) > 1_000_000:
             return installer_path
+        print(f"[smooth_brain/ollama] Downloaded file too small or missing: {installer_path}")
     except Exception as e:
         print(f"[smooth_brain/ollama] Download failed: {e}")
     return None
@@ -127,8 +137,16 @@ def _install_ollama_windows(installer_path: str) -> bool:
 def _download_ollama_linux() -> Optional[str]:
     """Download standalone Ollama binary for Linux. Returns path or None."""
     plugin_root = os.path.dirname(os.path.abspath(__file__))
-    bin_dir = os.path.join(plugin_root, "bin")
-    os.makedirs(bin_dir, exist_ok=True)
+    bin_dir = os.path.normpath(os.path.join(plugin_root, "bin"))
+    try:
+        os.makedirs(bin_dir, exist_ok=True)
+        if not os.access(bin_dir, os.W_OK):
+            print(f"[smooth_brain/ollama] Plugin bin directory not writable: {bin_dir}")
+            return None
+    except Exception as e:
+        print(f"[smooth_brain/ollama] Failed to create bin dir {bin_dir}: {e}")
+        return None
+
     ollama_path = os.path.join(bin_dir, "ollama")
 
     arch = platform.machine().lower()
@@ -303,8 +321,15 @@ def _http_request(method: str, path: str, data: Optional[Dict] = None, timeout: 
         with urllib.request.urlopen(req, data=json_data, timeout=timeout) as response:
             if 200 <= response.status < 300:
                 return json.loads(response.read().decode("utf-8"))
-    except Exception:
+            else:
+                print(f"[smooth_brain/ollama] API error: {method} {path} returned status {response.status}")
+    except urllib.error.HTTPError as e:
+        print(f"[smooth_brain/ollama] HTTP error: {method} {path} -> {e.code} {e.reason}")
+    except urllib.error.URLError as e:
+        # Expected if Ollama is not running
         pass
+    except Exception as e:
+        print(f"[smooth_brain/ollama] Request failed: {method} {path} -> {e}")
     return None
 
 
