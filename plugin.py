@@ -171,6 +171,14 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             self._wire_step3()
             self._wire_step4()
 
+            # ── Periodic Refreshes ─────────────────────────────────────────
+            blocks.load(
+                fn=self._get_ollama_badge,
+                inputs=[],
+                outputs=[self.sb_ollama_badge],
+                every=3,
+            )
+
         return blocks
 
     # ── Step 1: Story Setup ──────────────────────────────────────────────────

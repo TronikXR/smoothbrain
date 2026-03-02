@@ -5,6 +5,7 @@
 from __future__ import annotations
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -13,12 +14,6 @@ import threading
 import time
 import urllib.request
 from typing import Any, Dict, List, Optional
-
-try:
-    import httpx
-    HAS_HTTPX = True
-except ImportError:
-    HAS_HTTPX = False
 
 from .prompt_guides import format_guide_for_system_prompt
 from .story_templates import (
@@ -64,9 +59,18 @@ def _set_status(s: str):
 
 def _find_ollama() -> Optional[str]:
     """Find ollama executable on the system."""
+    # 1. Check for local binary in smooth_brain/bin/
+    plugin_root = os.path.dirname(os.path.abspath(__file__))
+    local_bin = os.path.join(plugin_root, "bin", "ollama.exe" if sys.platform == "win32" else "ollama")
+    if os.path.isfile(local_bin):
+        return local_bin
+
+    # 2. Check system PATH
     found = shutil.which("ollama")
     if found:
         return found
+
+    # 3. Check common platform-specific locations
     if sys.platform == "win32":
         for base in [
             os.environ.get("LOCALAPPDATA", ""),
@@ -120,19 +124,37 @@ def _install_ollama_windows(installer_path: str) -> bool:
         return False
 
 
-def _install_ollama_linux() -> bool:
-    """Install Ollama on Linux via official script."""
+def _download_ollama_linux() -> Optional[str]:
+    """Download standalone Ollama binary for Linux. Returns path or None."""
+    plugin_root = os.path.dirname(os.path.abspath(__file__))
+    bin_dir = os.path.join(plugin_root, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    ollama_path = os.path.join(bin_dir, "ollama")
+
+    arch = platform.machine().lower()
+    if arch in ("x86_64", "amd64"):
+        ollama_arch = "amd64"
+    elif arch in ("arm64", "aarch64"):
+        ollama_arch = "arm64"
+    else:
+        print(f"[smooth_brain/ollama] Unsupported Linux architecture: {arch}")
+        return None
+
+    url = f"https://ollama.com/download/ollama-linux-{ollama_arch}"
     try:
-        subprocess.run(
-            ["bash", "-c", _OLLAMA_LINUX_CMD],
-            timeout=300,
-            capture_output=True,
-        )
-        time.sleep(2)
-        return _find_ollama() is not None
+        print(f"[smooth_brain/ollama] Downloading Ollama ({ollama_arch}) from {url}...")
+        urllib.request.urlretrieve(url, ollama_path)
+        if os.path.isfile(ollama_path) and os.path.getsize(ollama_path) > 1_000_000:
+            os.chmod(ollama_path, 0o755)
+            return ollama_path
     except Exception as e:
-        print(f"[smooth_brain/ollama] Linux install failed: {e}")
-        return False
+        print(f"[smooth_brain/ollama] Linux download failed: {e}")
+    return None
+
+
+def _install_ollama_linux() -> bool:
+    """Install Ollama on Linux by downloading standalone binary."""
+    return _download_ollama_linux() is not None
 
 
 def _start_ollama_server(ollama_path: str) -> bool:
@@ -267,43 +289,50 @@ def ensure_ollama_background() -> None:
 
 # ── HTTP client ──────────────────────────────────────────────────────────────
 
-def _client() -> "httpx.Client":
-    return httpx.Client(base_url=OLLAMA_BASE, timeout=TIMEOUT)
+def _http_request(method: str, path: str, data: Optional[Dict] = None, timeout: float = TIMEOUT) -> Optional[Dict]:
+    """Robust HTTP request helper using urllib.request (no httpx dependency)."""
+    url = f"{OLLAMA_BASE}{path}"
+    try:
+        req = urllib.request.Request(url, method=method)
+        if data:
+            req.add_header("Content-Type", "application/json")
+            json_data = json.dumps(data).encode("utf-8")
+        else:
+            json_data = None
+
+        with urllib.request.urlopen(req, data=json_data, timeout=timeout) as response:
+            if 200 <= response.status < 300:
+                return json.loads(response.read().decode("utf-8"))
+    except Exception:
+        pass
+    return None
 
 
 def is_online() -> bool:
-    if not HAS_HTTPX:
-        return False
     try:
-        with _client() as c:
-            r = c.get("/api/tags", timeout=5.0)
-            return r.status_code == 200
+        return _http_request("GET", "/api/tags", timeout=5.0) is not None
     except Exception:
         return False
 
 
 def detect_model() -> Optional[str]:
     """Scan installed Ollama models and return the best one. None if none found."""
-    if not HAS_HTTPX:
-        return None
     try:
-        with _client() as c:
-            r = c.get("/api/tags", timeout=5.0)
-            if r.status_code != 200:
-                return None
-            data = r.json()
-            models: List[str] = [m["name"] for m in data.get("models", [])]
-            if not models:
-                return None
-            for pref in PREFERRED_MODELS:
-                base = pref.split(":")[0]
-                match = next(
-                    (m for m in models if m == pref or m == f"{pref}:latest" or m.startswith(base)),
-                    None,
-                )
-                if match:
-                    return match
+        data = _http_request("GET", "/api/tags", timeout=5.0)
+        if not data:
             return None
+        models: List[str] = [m["name"] for m in data.get("models", [])]
+        if not models:
+            return None
+        for pref in PREFERRED_MODELS:
+            base = pref.split(":")[0]
+            match = next(
+                (m for m in models if m == pref or m == f"{pref}:latest" or m.startswith(base)),
+                None,
+            )
+            if match:
+                return match
+        return None
     except Exception:
         return None
 
@@ -378,20 +407,18 @@ def _extract_json_array(text: str) -> Optional[List[Any]]:
 
 def _generate(model: str, system: str, prompt: str, temperature: float = 0.9, max_tokens: int = 4096) -> str:
     """Call Ollama /api/generate and return the response text."""
-    with _client() as c:
-        r = c.post("/api/generate", json={
-            "model": model,
-            "prompt": prompt,
-            "system": system,
-            "stream": False,
-            "keep_alive": 0,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens,
-            },
-        }, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json().get("response", "")
+    data = _http_request("POST", "/api/generate", {
+        "model": model,
+        "prompt": prompt,
+        "system": system,
+        "stream": False,
+        "keep_alive": 0,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    })
+    return data.get("response", "") if data else ""
 
 
 def describe_character_image(image_path: str) -> Optional[str]:
@@ -401,7 +428,7 @@ def describe_character_image(image_path: str) -> Optional[str]:
     vision is not available. The description is used to reinforce character consistency
     in shot prompts.
     """
-    if not is_online() or not HAS_HTTPX:
+    if not is_online():
         return None
 
     import base64
@@ -419,24 +446,22 @@ def describe_character_image(image_path: str) -> Optional[str]:
     )
 
     try:
-        with _client() as c:
-            r = c.post("/api/generate", json={
-                "model": model_name,
-                "prompt": "Describe this character in detail for use as a prompt reference.",
-                "system": system,
-                "images": [img_b64],
-                "stream": False,
-                "keep_alive": 0,
-                "options": {
-                    "temperature": 0.3,
-                    "num_predict": 256,
-                },
-            }, timeout=TIMEOUT)
-            r.raise_for_status()
-            desc = r.json().get("response", "").strip()
-            if desc and len(desc) > 10:
-                print(f"  [vision] Character description: {desc[:120]}...")
-                return desc
+        data = _http_request("POST", "/api/generate", {
+            "model": model_name,
+            "prompt": "Describe this character in detail for use as a prompt reference.",
+            "system": system,
+            "images": [img_b64],
+            "stream": False,
+            "keep_alive": 0,
+            "options": {
+                "temperature": 0.3,
+                "num_predict": 256,
+            },
+        })
+        desc = data.get("response", "").strip() if data else ""
+        if desc and len(desc) > 10:
+            print(f"  [vision] Character description: {desc[:120]}...")
+            return desc
     except Exception as e:
         print(f"  [vision] Character scan failed (model may not support vision): {e}")
     return None
@@ -526,7 +551,7 @@ def refine_single_prompt(
         print(f"  [prompt] No guide for {model_id}, using raw prompt")
         return raw_prompt
 
-    if not is_online() or not HAS_HTTPX:
+    if not is_online():
         print(f"  [prompt] Ollama offline — using raw prompt for {purpose}")
         return raw_prompt
 
@@ -578,7 +603,7 @@ def pack(
     count = max(2, min(shot_count, 20))
     weights = genre_weights or {"action": 50}
 
-    if not is_online() or not HAS_HTTPX:
+    if not is_online():
         print("[smooth_brain/ollama] Ollama offline — using template fallback")
         return _fallback_shots(concept, weights, count)
 
@@ -647,25 +672,21 @@ def pack(
 
 def get_status() -> Dict:
     """Return Ollama status dict."""
-    if not HAS_HTTPX:
-        return {"online": False, "model_ready": False, "error": "httpx not installed"}
     try:
-        with _client() as c:
-            r = c.get("/api/tags", timeout=5.0)
-            if r.status_code != 200:
-                return {"online": False, "model_ready": False, "error": "Ollama error"}
-            data = r.json()
-            models = [m["name"] for m in data.get("models", [])]
-            detected = detect_model()
-            if detected:
-                clear_model_cache()  # refresh
-                global _cached_model
-                _cached_model = detected
-            return {
-                "online": True,
-                "model_ready": len(models) > 0,
-                "active_model": detected or DEFAULT_MODEL,
-                "models": models,
-            }
+        data = _http_request("GET", "/api/tags", timeout=5.0)
+        if not data:
+            return {"online": False, "model_ready": False, "error": "Ollama offline"}
+        models = [m["name"] for m in data.get("models", [])]
+        detected = detect_model()
+        if detected:
+            clear_model_cache()  # refresh
+            global _cached_model
+            _cached_model = detected
+        return {
+            "online": True,
+            "model_ready": len(models) > 0,
+            "active_model": detected or DEFAULT_MODEL,
+            "models": models,
+        }
     except Exception as e:
         return {"online": False, "model_ready": False, "error": str(e)}
