@@ -3,7 +3,8 @@ import os
 import gradio as gr
 from typing import Any, Dict, List, Optional
 from .constants import (
-    ALL_GENRES, MAX_SHOTS
+    ALL_GENRES, MAX_SHOTS,
+    STATUS_PENDING, STATUS_READY, STATUS_APPROVED, STATUS_REJECTED
 )
 
 class WiringMixin:
