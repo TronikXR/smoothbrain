@@ -845,7 +845,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 image_model=image_model or "",
                 video_model=video_model or "",
             )
-        except Exception as e:
+        except (json.JSONDecodeError, OSError, ValueError) as e:
             shots = []
             status_html = f"<span style='color:red'>Error: {e}</span>"
             # Pad and return
@@ -1006,7 +1006,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         """Build a single render task dict for process_tasks_cli."""
         try:
             defaults = self.get_default_settings(model_type)
-        except Exception:
+        except (AttributeError, KeyError, ValueError, OSError):
             defaults = {}
         # Start from model defaults only — do NOT inherit primary_settings
         # from main UI (which may have wrong step count, resolution, etc.)
@@ -1090,7 +1090,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                     "plugin_data": task.get("plugin_data", {}),
                 })
             return self.process_tasks_cli(queue, cli_state)
-        except Exception as e:
+        except (AttributeError, KeyError, ValueError, OSError) as e:
             traceback.print_exc()
             return False
 
@@ -1173,7 +1173,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 gr.update(),
                 gr.update(),
             )
-        except Exception as e:
+        except (AttributeError, KeyError, ValueError, OSError) as e:
             traceback.print_exc()
             yield f"<span style='color:red'>Error: {e}</span>", gr.update(visible=False), gr.update(), gr.update()
 

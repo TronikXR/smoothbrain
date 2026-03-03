@@ -3,10 +3,8 @@
 # Handles model detection, prompt packing, prompt refinement, and auto-setup.
 
 from __future__ import annotations
-import hashlib
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -15,6 +13,12 @@ import threading
 import time
 import urllib.request
 from typing import Any, Dict, List, Optional
+
+try:
+    import httpx
+    HAS_HTTPX = True
+except ImportError:
+    HAS_HTTPX = False
 
 from .prompt_guides import format_guide_for_system_prompt
 from .story_templates import (
@@ -45,7 +49,6 @@ _ollama_process: Optional[subprocess.Popen] = None
 # Official download URLs
 _OLLAMA_WINDOWS_URL = "https://ollama.com/download/OllamaSetup.exe"
 _OLLAMA_LINUX_CMD = "curl -fsSL https://ollama.com/install.sh | sh"
-_OLLAMA_CHECKSUMS_URL = "https://github.com/ollama/ollama/releases/latest/download/sha256sum.txt"
 
 
 def setup_status() -> str:
@@ -59,56 +62,11 @@ def _set_status(s: str):
     print(f"[smooth_brain/ollama] setup: {s}")
 
 
-def _file_sha256(filepath: str) -> str:
-    """Calculate SHA256 hash of a file."""
-    sha256 = hashlib.sha256()
-    try:
-        with open(filepath, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                sha256.update(chunk)
-        return sha256.hexdigest()
-    except (OSError, IOError) as e:
-        print(f"[smooth_brain/ollama] Failed to calculate SHA256 for {filepath}: {e}")
-        return ""
-
-
-def _get_official_checksums() -> Dict[str, str]:
-    """Fetch and parse official SHA256 checksums from Ollama GitHub.
-    Returns map of {filename: hash}.
-    """
-    checksums = {}
-    try:
-        print(f"[smooth_brain/ollama] Fetching official checksums from {_OLLAMA_CHECKSUMS_URL}...")
-        with urllib.request.urlopen(_OLLAMA_CHECKSUMS_URL, timeout=10.0) as response:
-            if response.status == 200:
-                content = response.read().decode("utf-8")
-                for line in content.splitlines():
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        h, f = parts[0], parts[1]
-                        # Remove leading ./ if present
-                        if f.startswith("./"):
-                            f = f[2:]
-                        checksums[f] = h.lower()
-    except Exception as e:
-        print(f"[smooth_brain/ollama] Failed to fetch checksums: {e}")
-    return checksums
-
-
 def _find_ollama() -> Optional[str]:
     """Find ollama executable on the system."""
-    # 1. Check for local binary in smooth_brain/bin/
-    plugin_root = os.path.dirname(os.path.abspath(__file__))
-    local_bin = os.path.normpath(os.path.join(plugin_root, "bin", "ollama.exe" if sys.platform == "win32" else "ollama"))
-    if os.path.isfile(local_bin):
-        return local_bin
-
-    # 2. Check system PATH
     found = shutil.which("ollama")
     if found:
         return found
-
-    # 3. Check common platform-specific locations
     if sys.platform == "win32":
         for base in [
             os.environ.get("LOCALAPPDATA", ""),
@@ -132,44 +90,17 @@ def _find_ollama() -> Optional[str]:
 
 def _download_ollama_windows() -> Optional[str]:
     """Download Ollama installer for Windows. Returns path to .exe or None."""
-    tmp_dir = os.path.normpath(os.path.join(os.environ.get("TEMP", "/tmp"), "smooth_brain_ollama"))
-    try:
-        os.makedirs(tmp_dir, exist_ok=True)
-        if not os.access(tmp_dir, os.W_OK):
-            print(f"[smooth_brain/ollama] Temporary directory not writable: {tmp_dir}")
-            return None
-    except OSError as e:
-        print(f"[smooth_brain/ollama] Failed to create temp dir {tmp_dir}: {e}")
-        return None
-
+    tmp_dir = os.path.join(os.environ.get("TEMP", "/tmp"), "smooth_brain_ollama")
+    os.makedirs(tmp_dir, exist_ok=True)
     installer_path = os.path.join(tmp_dir, "OllamaSetup.exe")
     if os.path.isfile(installer_path) and os.path.getsize(installer_path) > 1_000_000:
         return installer_path
-
     try:
         print(f"[smooth_brain/ollama] Downloading Ollama from {_OLLAMA_WINDOWS_URL}...")
         urllib.request.urlretrieve(_OLLAMA_WINDOWS_URL, installer_path)
         if os.path.isfile(installer_path) and os.path.getsize(installer_path) > 1_000_000:
-            actual_sha = _file_sha256(installer_path)
-            print(f"[smooth_brain/ollama] Downloaded Ollama Setup (SHA256: {actual_sha[:12]}...)")
-
-            # Integrity check
-            checksums = _get_official_checksums()
-            expected_sha = checksums.get("OllamaSetup.exe")
-            if expected_sha:
-                if actual_sha == expected_sha:
-                    print("[smooth_brain/ollama] SHA256 verified successfully")
-                    return installer_path
-                else:
-                    print(f"[smooth_brain/ollama] SHA256 MISMATCH! Expected {expected_sha}, got {actual_sha}")
-                    os.remove(installer_path)
-                    return None
-            else:
-                print("[smooth_brain/ollama] Warning: Could not find official checksum for OllamaSetup.exe — skipping verification")
-                return installer_path
-
-        print(f"[smooth_brain/ollama] Downloaded file too small or missing: {installer_path}")
-    except (urllib.error.URLError, OSError) as e:
+            return installer_path
+    except Exception as e:
         print(f"[smooth_brain/ollama] Download failed: {e}")
     return None
 
@@ -184,87 +115,24 @@ def _install_ollama_windows(installer_path: str) -> bool:
         )
         time.sleep(3)
         return _find_ollama() is not None
-    except (subprocess.SubprocessError, OSError) as e:
+    except (OSError, ValueError) as e:
         print(f"[smooth_brain/ollama] Install failed: {e}")
         return False
 
 
-def _download_ollama_linux() -> Optional[str]:
-    """Download standalone Ollama binary for Linux. Returns path or None."""
-    plugin_root = os.path.dirname(os.path.abspath(__file__))
-    bin_dir = os.path.normpath(os.path.join(plugin_root, "bin"))
-    try:
-        os.makedirs(bin_dir, exist_ok=True)
-        if not os.access(bin_dir, os.W_OK):
-            print(f"[smooth_brain/ollama] Plugin bin directory not writable: {bin_dir}")
-            return None
-    except OSError as e:
-        print(f"[smooth_brain/ollama] Failed to create bin dir {bin_dir}: {e}")
-        return None
-
-    ollama_path = os.path.join(bin_dir, "ollama")
-
-    arch = platform.machine().lower()
-    if arch in ("x86_64", "amd64"):
-        ollama_arch = "amd64"
-    elif arch in ("arm64", "aarch64"):
-        ollama_arch = "arm64"
-    else:
-        print(f"[smooth_brain/ollama] Unsupported Linux architecture: {arch}")
-        return None
-
-    filename = f"ollama-linux-{ollama_arch}"
-    url = f"https://ollama.com/download/{filename}"
-    try:
-        print(f"[smooth_brain/ollama] Downloading Ollama ({ollama_arch}) from {url}...")
-        urllib.request.urlretrieve(url, ollama_path)
-        if os.path.isfile(ollama_path) and os.path.getsize(ollama_path) > 1_000_000:
-            actual_sha = _file_sha256(ollama_path)
-            print(f"[smooth_brain/ollama] Downloaded Ollama binary (SHA256: {actual_sha[:12]}...)")
-
-            # Integrity check
-            checksums = _get_official_checksums()
-            # The direct download from ollama.com redirects to tar.zst on GitHub if using installer script,
-            # but we are downloading the single binary.
-            # Actually, looking at sha256sum.txt, they list files like:
-            # ad2a74bd158f63bc0a880f83f525c7acb00227606788b9f66494f045befc4ea2  ./ollama-linux-amd64.tar.zst
-            # Wait, the single binary might not be in the sha256sum.txt or it has a different name.
-            # Let's check my earlier curl output.
-            # location: https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64
-            # Looking at the sha256sum.txt I fetched earlier, it does NOT list the single binary without extension.
-            # It lists .tar.zst, .tgz, .zip, .dmg, .exe.
-            # If I download 'ollama-linux-amd64', it's just the binary.
-            # Actually, it seems I might be better off downloading the tar.zst and extracting, but that's more complex.
-            # Let's see if 'ollama-linux-amd64' is listed. No, it isn't in the one I saw.
-            # Wait, let me check again.
-            # 0.17.5 sha256sum.txt:
-            # ad2a74bd158f63bc0a880f83f525c7acb00227606788b9f66494f045befc4ea2 ./ollama-linux-amd64.tar.zst
-            # If the single binary isn't verified, I should at least verify the Windows one.
-            # For Linux, maybe I should check if there's a hash for the binary.
-            # If not, I'll log a warning.
-
-            expected_sha = checksums.get(filename) # Might be None
-            if expected_sha:
-                if actual_sha == expected_sha:
-                    print("[smooth_brain/ollama] SHA256 verified successfully")
-                    os.chmod(ollama_path, 0o755)
-                    return ollama_path
-                else:
-                    print(f"[smooth_brain/ollama] SHA256 MISMATCH! Expected {expected_sha}, got {actual_sha}")
-                    os.remove(ollama_path)
-                    return None
-            else:
-                print(f"[smooth_brain/ollama] Warning: Could not find official checksum for {filename} — skipping verification")
-                os.chmod(ollama_path, 0o755)
-                return ollama_path
-    except (urllib.error.URLError, OSError) as e:
-        print(f"[smooth_brain/ollama] Linux download failed: {e}")
-    return None
-
-
 def _install_ollama_linux() -> bool:
-    """Install Ollama on Linux by downloading standalone binary."""
-    return _download_ollama_linux() is not None
+    """Install Ollama on Linux via official script."""
+    try:
+        subprocess.run(
+            ["bash", "-c", _OLLAMA_LINUX_CMD],
+            timeout=300,
+            capture_output=True,
+        )
+        time.sleep(2)
+        return _find_ollama() is not None
+    except Exception as e:
+        print(f"[smooth_brain/ollama] Linux install failed: {e}")
+        return False
 
 
 def _start_ollama_server(ollama_path: str) -> bool:
@@ -291,7 +159,7 @@ def _start_ollama_server(ollama_path: str) -> bool:
             if is_online():
                 return True
         print("[smooth_brain/ollama] Server started but not responding after 30s")
-    except (subprocess.SubprocessError, OSError) as e:
+    except Exception as e:
         print(f"[smooth_brain/ollama] Failed to start server: {e}")
     return False
 
@@ -312,7 +180,7 @@ def _pull_model(ollama_path: str, model: str = DEFAULT_MODEL) -> bool:
         print(f"[smooth_brain/ollama] Pull failed: {result.stderr[:200]}")
     except subprocess.TimeoutExpired:
         print(f"[smooth_brain/ollama] Pull timed out for {model}")
-    except (subprocess.SubprocessError, OSError) as e:
+    except Exception as e:
         print(f"[smooth_brain/ollama] Pull error: {e}")
     return False
 
@@ -399,59 +267,45 @@ def ensure_ollama_background() -> None:
 
 # ── HTTP client ──────────────────────────────────────────────────────────────
 
-def _http_request(method: str, path: str, data: Optional[Dict] = None, timeout: float = TIMEOUT) -> Optional[Dict]:
-    """Robust HTTP request helper using urllib.request (no httpx dependency)."""
-    url = f"{OLLAMA_BASE}{path}"
-    try:
-        req = urllib.request.Request(url, method=method)
-        if data:
-            req.add_header("Content-Type", "application/json")
-            json_data = json.dumps(data).encode("utf-8")
-        else:
-            json_data = None
-
-        with urllib.request.urlopen(req, data=json_data, timeout=timeout) as response:
-            body = response.read().decode("utf-8")
-            try:
-                return json.loads(body)
-            except json.JSONDecodeError as e:
-                print(f"[smooth_brain/ollama] JSON decode error from {path}: {e}")
-                return None
-    except urllib.error.HTTPError as e:
-        print(f"[smooth_brain/ollama] HTTP error: {method} {path} -> {e.code} {e.reason}")
-    except urllib.error.URLError as e:
-        # Expected if Ollama is not running
-        pass
-    except Exception as e:
-        print(f"[smooth_brain/ollama] Request failed: {method} {path} -> {e}")
-    return None
+def _client() -> "httpx.Client":
+    return httpx.Client(base_url=OLLAMA_BASE, timeout=TIMEOUT)
 
 
 def is_online() -> bool:
-    """Check if Ollama server is responsive."""
-    return _http_request("GET", "/api/tags", timeout=5.0) is not None
+    if not HAS_HTTPX:
+        return False
+    try:
+        with _client() as c:
+            r = c.get("/api/tags", timeout=5.0)
+            return r.status_code == 200
+    except Exception:
+        return False
 
 
 def detect_model() -> Optional[str]:
     """Scan installed Ollama models and return the best one. None if none found."""
-    data = _http_request("GET", "/api/tags", timeout=5.0)
-    if not data:
+    if not HAS_HTTPX:
         return None
     try:
-        models: List[str] = [m["name"] for m in data.get("models", [])]
-        if not models:
+        with _client() as c:
+            r = c.get("/api/tags", timeout=5.0)
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            models: List[str] = [m["name"] for m in data.get("models", [])]
+            if not models:
+                return None
+            for pref in PREFERRED_MODELS:
+                base = pref.split(":")[0]
+                match = next(
+                    (m for m in models if m == pref or m == f"{pref}:latest" or m.startswith(base)),
+                    None,
+                )
+                if match:
+                    return match
             return None
-        for pref in PREFERRED_MODELS:
-            base = pref.split(":")[0]
-            match = next(
-                (m for m in models if m == pref or m == f"{pref}:latest" or m.startswith(base)),
-                None,
-            )
-            if match:
-                return match
-    except (KeyError, TypeError) as e:
-        print(f"[smooth_brain/ollama] Unexpected response format in detect_model: {e}")
-    return None
+    except Exception:
+        return None
 
 
 def get_model_name() -> str:
@@ -470,19 +324,6 @@ def get_model_name() -> str:
 def clear_model_cache() -> None:
     global _cached_model
     _cached_model = None
-
-
-# ── Sanitization helpers ──────────────────────────────────────────────────────
-
-def sanitize_prompt(text: str) -> str:
-    """Sanitize user input to prevent prompt injection and formatting issues."""
-    if not text:
-        return ""
-    # Remove triple backticks which can break JSON/Markdown parsing in LLM response
-    text = text.replace("```", "")
-    # Remove excessive newlines
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
 
 
 # ── JSON extraction helpers ───────────────────────────────────────────────────
@@ -537,18 +378,20 @@ def _extract_json_array(text: str) -> Optional[List[Any]]:
 
 def _generate(model: str, system: str, prompt: str, temperature: float = 0.9, max_tokens: int = 4096) -> str:
     """Call Ollama /api/generate and return the response text."""
-    data = _http_request("POST", "/api/generate", {
-        "model": model,
-        "prompt": prompt,
-        "system": system,
-        "stream": False,
-        "keep_alive": 0,
-        "options": {
-            "temperature": temperature,
-            "num_predict": max_tokens,
-        },
-    })
-    return data.get("response", "") if data else ""
+    with _client() as c:
+        r = c.post("/api/generate", json={
+            "model": model,
+            "prompt": prompt,
+            "system": system,
+            "stream": False,
+            "keep_alive": 0,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
+        }, timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json().get("response", "")
 
 
 def describe_character_image(image_path: str) -> Optional[str]:
@@ -558,15 +401,14 @@ def describe_character_image(image_path: str) -> Optional[str]:
     vision is not available. The description is used to reinforce character consistency
     in shot prompts.
     """
-    if not is_online():
+    if not is_online() or not HAS_HTTPX:
         return None
 
     import base64
     try:
         with open(image_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("utf-8")
-    except (OSError, IOError) as e:
-        print(f"[smooth_brain/ollama] Failed to read character image {image_path}: {e}")
+    except Exception:
         return None
 
     model_name = get_model_name()
@@ -576,28 +418,32 @@ def describe_character_image(image_path: str) -> Optional[str]:
         "Be specific and concise (under 60 words). Output ONLY the description, no commentary."
     )
 
-    data = _http_request("POST", "/api/generate", {
-        "model": model_name,
-        "prompt": "Describe this character in detail for use as a prompt reference.",
-        "system": system,
-        "images": [img_b64],
-        "stream": False,
-        "keep_alive": 0,
-        "options": {
-            "temperature": 0.3,
-            "num_predict": 256,
-        },
-    })
-    desc = data.get("response", "").strip() if data else ""
-    if desc and len(desc) > 10:
-        print(f"  [vision] Character description: {desc[:120]}...")
-        return desc
+    try:
+        with _client() as c:
+            r = c.post("/api/generate", json={
+                "model": model_name,
+                "prompt": "Describe this character in detail for use as a prompt reference.",
+                "system": system,
+                "images": [img_b64],
+                "stream": False,
+                "keep_alive": 0,
+                "options": {
+                    "temperature": 0.3,
+                    "num_predict": 256,
+                },
+            }, timeout=TIMEOUT)
+            r.raise_for_status()
+            desc = r.json().get("response", "").strip()
+            if desc and len(desc) > 10:
+                print(f"  [vision] Character description: {desc[:120]}...")
+                return desc
+    except Exception as e:
+        print(f"  [vision] Character scan failed (model may not support vision): {e}")
     return None
 
 
 def _fallback_shots(concept: str, genre_weights: Dict[str, int], shot_count: int) -> List[Dict]:
     """Generate shots from templates when Ollama is offline."""
-    concept = sanitize_prompt(concept)
     templates = get_weighted_templates(genre_weights, count=1)
     template = templates[0] if templates else TEMPLATES[0]
     beats = fill_template(template, concept or "the hero", shot_count)
@@ -641,18 +487,21 @@ def _refine_prompts(
     prompt_list = "\n".join(f'{i+1}. "{s["prompt"]}"' for i, s in enumerate(shots))
     user_prompt = f"Refine these {len(shots)} shot prompts:\n\n{prompt_list}"
 
-    raw = _generate(model_name, system, user_prompt, temperature=0.4, max_tokens=4096)
-    refined = _extract_json_array(raw)
-    if refined and len(refined) == len(shots):
-        return [
-            {
-                **shot,
-                "imagePrompt": refined[i].get("imagePrompt", shot["prompt"]),
-                "videoPrompt": refined[i].get("videoPrompt", shot["prompt"]),
-            }
-            for i, shot in enumerate(shots)
-        ]
-    print(f"[smooth_brain/ollama] refinement returned {len(refined) if refined else 0}/{len(shots)} items — skipping")
+    try:
+        raw = _generate(model_name, system, user_prompt, temperature=0.4, max_tokens=4096)
+        refined = _extract_json_array(raw)
+        if refined and len(refined) == len(shots):
+            return [
+                {
+                    **shot,
+                    "imagePrompt": refined[i].get("imagePrompt", shot["prompt"]),
+                    "videoPrompt": refined[i].get("videoPrompt", shot["prompt"]),
+                }
+                for i, shot in enumerate(shots)
+            ]
+        print(f"[smooth_brain/ollama] refinement returned {len(refined) if refined else 0}/{len(shots)} items — skipping")
+    except Exception as e:
+        print(f"[smooth_brain/ollama] refinement failed: {e}")
 
     return None
 
@@ -662,7 +511,6 @@ def refine_single_prompt(
     model_id: str,
     purpose: str = "image",
 ) -> str:
-    raw_prompt = sanitize_prompt(raw_prompt)
     """Apply model-specific prompt guide to a single prompt at render time.
 
     Args:
@@ -678,7 +526,7 @@ def refine_single_prompt(
         print(f"  [prompt] No guide for {model_id}, using raw prompt")
         return raw_prompt
 
-    if not is_online():
+    if not is_online() or not HAS_HTTPX:
         print(f"  [prompt] Ollama offline — using raw prompt for {purpose}")
         return raw_prompt
 
@@ -696,17 +544,20 @@ def refine_single_prompt(
     )
 
     model_name = get_model_name()
-    refined = _generate(
-        model_name, system,
-        f"Refine this {purpose} prompt:\n\n{raw_prompt}",
-        temperature=0.3, max_tokens=512,
-    ).strip()
-    if refined and len(refined) > 10:
-        print(f"  [prompt] Refined ({purpose}, {model_id}):")
-        print(f"    Original: {raw_prompt[:120]}...")
-        print(f"    Refined:  {refined[:120]}...")
-        return refined
-    print(f"  [prompt] Refinement too short, using raw prompt")
+    try:
+        refined = _generate(
+            model_name, system,
+            f"Refine this {purpose} prompt:\n\n{raw_prompt}",
+            temperature=0.3, max_tokens=512,
+        ).strip()
+        if refined and len(refined) > 10:
+            print(f"  [prompt] Refined ({purpose}, {model_id}):")
+            print(f"    Original: {raw_prompt[:120]}...")
+            print(f"    Refined:  {refined[:120]}...")
+            return refined
+        print(f"  [prompt] Refinement too short, using raw prompt")
+    except Exception as e:
+        print(f"  [prompt] Refinement failed for {model_id}: {e}")
 
     return raw_prompt
 
@@ -724,16 +575,15 @@ def pack(
 
     Falls back to template-based beats if Ollama is offline.
     """
-    concept = sanitize_prompt(concept)
     count = max(2, min(shot_count, 20))
     weights = genre_weights or {"action": 50}
 
-    if not is_online():
+    if not is_online() or not HAS_HTTPX:
         print("[smooth_brain/ollama] Ollama offline — using template fallback")
         return _fallback_shots(concept, weights, count)
 
     # ── Step 1: Generate story beat list ────────────────────────────────────
-    if concept:
+    if concept.strip():
         story_input = f'Subject/theme: "{concept}".\nInvent a compelling short story around this subject, then break it into shots.'
     else:
         story_input = "Invent a completely original, surprising, and visually stunning short story. Be creative and unexpected. Break it into shots."
@@ -762,16 +612,20 @@ def pack(
     )
 
     model_name = get_model_name()
-    raw = _generate(
-        model_name,
-        system,
-        f"Generate a {count}-shot storyboard:\n\n{story_input}",
-        temperature=0.9,
-        max_tokens=4096,
-    )
-    shots = _extract_json_array(raw)
-    if not shots or len(shots) == 0:
-        print("[smooth_brain/ollama] pack: invalid JSON from LLM — using templates")
+    try:
+        raw = _generate(
+            model_name,
+            system,
+            f"Generate a {count}-shot storyboard:\n\n{story_input}",
+            temperature=0.9,
+            max_tokens=4096,
+        )
+        shots = _extract_json_array(raw)
+        if not shots or len(shots) == 0:
+            print("[smooth_brain/ollama] pack: invalid JSON from LLM — using templates")
+            return _fallback_shots(concept, weights, count)
+    except Exception as e:
+        print(f"[smooth_brain/ollama] pack generation failed: {e} — using templates")
         return _fallback_shots(concept, weights, count)
 
     # ── Step 2: Refine prompts for target models ─────────────────────────────
@@ -793,21 +647,25 @@ def pack(
 
 def get_status() -> Dict:
     """Return Ollama status dict."""
-    data = _http_request("GET", "/api/tags", timeout=5.0)
-    if not data:
-        return {"online": False, "model_ready": False, "error": "Ollama offline"}
+    if not HAS_HTTPX:
+        return {"online": False, "model_ready": False, "error": "httpx not installed"}
     try:
-        models = [m["name"] for m in data.get("models", [])]
-        detected = detect_model()
-        if detected:
-            clear_model_cache()  # refresh
-            global _cached_model
-            _cached_model = detected
-        return {
-            "online": True,
-            "model_ready": len(models) > 0,
-            "active_model": detected or DEFAULT_MODEL,
-            "models": models,
-        }
-    except (KeyError, TypeError) as e:
-        return {"online": False, "model_ready": False, "error": f"Malformed response: {e}"}
+        with _client() as c:
+            r = c.get("/api/tags", timeout=5.0)
+            if r.status_code != 200:
+                return {"online": False, "model_ready": False, "error": "Ollama error"}
+            data = r.json()
+            models = [m["name"] for m in data.get("models", [])]
+            detected = detect_model()
+            if detected:
+                clear_model_cache()  # refresh
+                global _cached_model
+                _cached_model = detected
+            return {
+                "online": True,
+                "model_ready": len(models) > 0,
+                "active_model": detected or DEFAULT_MODEL,
+                "models": models,
+            }
+    except Exception as e:
+        return {"online": False, "model_ready": False, "error": str(e)}
