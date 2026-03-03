@@ -24,10 +24,11 @@ from .ollama import (
     ensure_ollama_background, setup_status as ollama_setup_status,
 )
 from .state import (
-    save_project, load_project, is_ltx_model, vibe_to_resolution,
+    save_project, load_project, is_ltx_model,
     duration_to_frames,
     create_project_dir, copy_to_project,
     list_recent_projects, scan_project_gallery,
+    build_video_params, ShotState, clear_session,
 )
 from .story_templates import ALL_GENRES
 from .model_scanner import (
@@ -70,7 +71,6 @@ STATUS_REJECTED  = "rejected"
 class SmoothBrainPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
-        self._session: Optional[SmoothBrainSession] = None
         # Cached at startup to avoid hitting filesystem on every event
         self._video_models: List[dict] = []
         self._image_models: List[dict] = []

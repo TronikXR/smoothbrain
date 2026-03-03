@@ -114,7 +114,7 @@ def _download_ollama_windows() -> Optional[str]:
         if not os.access(tmp_dir, os.W_OK):
             print(f"[smooth_brain/ollama] Temporary directory not writable: {tmp_dir}")
             return None
-    except Exception as e:
+    except OSError as e:
         print(f"[smooth_brain/ollama] Failed to create temp dir {tmp_dir}: {e}")
         return None
 
@@ -130,7 +130,7 @@ def _download_ollama_windows() -> Optional[str]:
             print(f"[smooth_brain/ollama] Downloaded Ollama Setup (SHA256: {sha[:12]}...)")
             return installer_path
         print(f"[smooth_brain/ollama] Downloaded file too small or missing: {installer_path}")
-    except Exception as e:
+    except (urllib.error.URLError, OSError) as e:
         print(f"[smooth_brain/ollama] Download failed: {e}")
     return None
 
@@ -145,7 +145,7 @@ def _install_ollama_windows(installer_path: str) -> bool:
         )
         time.sleep(3)
         return _find_ollama() is not None
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         print(f"[smooth_brain/ollama] Install failed: {e}")
         return False
 
@@ -159,7 +159,7 @@ def _download_ollama_linux() -> Optional[str]:
         if not os.access(bin_dir, os.W_OK):
             print(f"[smooth_brain/ollama] Plugin bin directory not writable: {bin_dir}")
             return None
-    except Exception as e:
+    except OSError as e:
         print(f"[smooth_brain/ollama] Failed to create bin dir {bin_dir}: {e}")
         return None
 
@@ -183,7 +183,7 @@ def _download_ollama_linux() -> Optional[str]:
             print(f"[smooth_brain/ollama] Downloaded Ollama binary (SHA256: {sha[:12]}...)")
             os.chmod(ollama_path, 0o755)
             return ollama_path
-    except Exception as e:
+    except (urllib.error.URLError, OSError) as e:
         print(f"[smooth_brain/ollama] Linux download failed: {e}")
     return None
 
@@ -217,7 +217,7 @@ def _start_ollama_server(ollama_path: str) -> bool:
             if is_online():
                 return True
         print("[smooth_brain/ollama] Server started but not responding after 30s")
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         print(f"[smooth_brain/ollama] Failed to start server: {e}")
     return False
 
@@ -238,7 +238,7 @@ def _pull_model(ollama_path: str, model: str = DEFAULT_MODEL) -> bool:
         print(f"[smooth_brain/ollama] Pull failed: {result.stderr[:200]}")
     except subprocess.TimeoutExpired:
         print(f"[smooth_brain/ollama] Pull timed out for {model}")
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         print(f"[smooth_brain/ollama] Pull error: {e}")
     return False
 
@@ -338,7 +338,12 @@ def _http_request(method: str, path: str, data: Optional[Dict] = None, timeout: 
 
         with urllib.request.urlopen(req, data=json_data, timeout=timeout) as response:
             if 200 <= response.status < 300:
-                return json.loads(response.read().decode("utf-8"))
+                body = response.read().decode("utf-8")
+                try:
+                    return json.loads(body)
+                except json.JSONDecodeError as e:
+                    print(f"[smooth_brain/ollama] JSON decode error from {path}: {e}")
+                    return None
             else:
                 print(f"[smooth_brain/ollama] API error: {method} {path} returned status {response.status}")
     except urllib.error.HTTPError as e:
@@ -500,25 +505,22 @@ def describe_character_image(image_path: str) -> Optional[str]:
         "Be specific and concise (under 60 words). Output ONLY the description, no commentary."
     )
 
-    try:
-        data = _http_request("POST", "/api/generate", {
-            "model": model_name,
-            "prompt": "Describe this character in detail for use as a prompt reference.",
-            "system": system,
-            "images": [img_b64],
-            "stream": False,
-            "keep_alive": 0,
-            "options": {
-                "temperature": 0.3,
-                "num_predict": 256,
-            },
-        })
-        desc = data.get("response", "").strip() if data else ""
-        if desc and len(desc) > 10:
-            print(f"  [vision] Character description: {desc[:120]}...")
-            return desc
-    except Exception as e:
-        print(f"  [vision] Character scan failed (model may not support vision): {e}")
+    data = _http_request("POST", "/api/generate", {
+        "model": model_name,
+        "prompt": "Describe this character in detail for use as a prompt reference.",
+        "system": system,
+        "images": [img_b64],
+        "stream": False,
+        "keep_alive": 0,
+        "options": {
+            "temperature": 0.3,
+            "num_predict": 256,
+        },
+    })
+    desc = data.get("response", "").strip() if data else ""
+    if desc and len(desc) > 10:
+        print(f"  [vision] Character description: {desc[:120]}...")
+        return desc
     return None
 
 
@@ -568,21 +570,18 @@ def _refine_prompts(
     prompt_list = "\n".join(f'{i+1}. "{s["prompt"]}"' for i, s in enumerate(shots))
     user_prompt = f"Refine these {len(shots)} shot prompts:\n\n{prompt_list}"
 
-    try:
-        raw = _generate(model_name, system, user_prompt, temperature=0.4, max_tokens=4096)
-        refined = _extract_json_array(raw)
-        if refined and len(refined) == len(shots):
-            return [
-                {
-                    **shot,
-                    "imagePrompt": refined[i].get("imagePrompt", shot["prompt"]),
-                    "videoPrompt": refined[i].get("videoPrompt", shot["prompt"]),
-                }
-                for i, shot in enumerate(shots)
-            ]
-        print(f"[smooth_brain/ollama] refinement returned {len(refined) if refined else 0}/{len(shots)} items — skipping")
-    except Exception as e:
-        print(f"[smooth_brain/ollama] refinement failed: {e}")
+    raw = _generate(model_name, system, user_prompt, temperature=0.4, max_tokens=4096)
+    refined = _extract_json_array(raw)
+    if refined and len(refined) == len(shots):
+        return [
+            {
+                **shot,
+                "imagePrompt": refined[i].get("imagePrompt", shot["prompt"]),
+                "videoPrompt": refined[i].get("videoPrompt", shot["prompt"]),
+            }
+            for i, shot in enumerate(shots)
+        ]
+    print(f"[smooth_brain/ollama] refinement returned {len(refined) if refined else 0}/{len(shots)} items — skipping")
 
     return None
 
@@ -626,20 +625,17 @@ def refine_single_prompt(
     )
 
     model_name = get_model_name()
-    try:
-        refined = _generate(
-            model_name, system,
-            f"Refine this {purpose} prompt:\n\n{raw_prompt}",
-            temperature=0.3, max_tokens=512,
-        ).strip()
-        if refined and len(refined) > 10:
-            print(f"  [prompt] Refined ({purpose}, {model_id}):")
-            print(f"    Original: {raw_prompt[:120]}...")
-            print(f"    Refined:  {refined[:120]}...")
-            return refined
-        print(f"  [prompt] Refinement too short, using raw prompt")
-    except Exception as e:
-        print(f"  [prompt] Refinement failed for {model_id}: {e}")
+    refined = _generate(
+        model_name, system,
+        f"Refine this {purpose} prompt:\n\n{raw_prompt}",
+        temperature=0.3, max_tokens=512,
+    ).strip()
+    if refined and len(refined) > 10:
+        print(f"  [prompt] Refined ({purpose}, {model_id}):")
+        print(f"    Original: {raw_prompt[:120]}...")
+        print(f"    Refined:  {refined[:120]}...")
+        return refined
+    print(f"  [prompt] Refinement too short, using raw prompt")
 
     return raw_prompt
 
@@ -695,20 +691,16 @@ def pack(
     )
 
     model_name = get_model_name()
-    try:
-        raw = _generate(
-            model_name,
-            system,
-            f"Generate a {count}-shot storyboard:\n\n{story_input}",
-            temperature=0.9,
-            max_tokens=4096,
-        )
-        shots = _extract_json_array(raw)
-        if not shots or len(shots) == 0:
-            print("[smooth_brain/ollama] pack: invalid JSON from LLM — using templates")
-            return _fallback_shots(concept, weights, count)
-    except Exception as e:
-        print(f"[smooth_brain/ollama] pack generation failed: {e} — using templates")
+    raw = _generate(
+        model_name,
+        system,
+        f"Generate a {count}-shot storyboard:\n\n{story_input}",
+        temperature=0.9,
+        max_tokens=4096,
+    )
+    shots = _extract_json_array(raw)
+    if not shots or len(shots) == 0:
+        print("[smooth_brain/ollama] pack: invalid JSON from LLM — using templates")
         return _fallback_shots(concept, weights, count)
 
     # ── Step 2: Refine prompts for target models ─────────────────────────────
@@ -730,10 +722,10 @@ def pack(
 
 def get_status() -> Dict:
     """Return Ollama status dict."""
+    data = _http_request("GET", "/api/tags", timeout=5.0)
+    if not data:
+        return {"online": False, "model_ready": False, "error": "Ollama offline"}
     try:
-        data = _http_request("GET", "/api/tags", timeout=5.0)
-        if not data:
-            return {"online": False, "model_ready": False, "error": "Ollama offline"}
         models = [m["name"] for m in data.get("models", [])]
         detected = detect_model()
         if detected:
@@ -746,5 +738,5 @@ def get_status() -> Dict:
             "active_model": detected or DEFAULT_MODEL,
             "models": models,
         }
-    except Exception as e:
-        return {"online": False, "model_ready": False, "error": str(e)}
+    except (KeyError, TypeError) as e:
+        return {"online": False, "model_ready": False, "error": f"Malformed response: {e}"}

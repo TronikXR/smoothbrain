@@ -7,7 +7,7 @@ import os
 import re
 import shutil
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any, Tuple
 
 # Legacy single-file autosave (kept for backwards compat / migration)
@@ -16,7 +16,6 @@ AUTOSAVE_PATH = os.path.join(os.path.dirname(__file__), ".smooth_brain_session.j
 # Default base directory for project folders (relative to wan2gp root)
 _WGP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_PROJECTS_BASE = os.path.join(_WGP_ROOT, "outputs", "smooth_brain")
-
 
 # ── Data classes ──────────────────────────────────────────────────────────────
 
@@ -167,8 +166,8 @@ def load_project(project_dir: str) -> Optional[dict]:
             data = json.load(f)
         data["project_dir"] = project_dir
         return data
-    except Exception as e:
-        print(f"[smooth_brain] load_project failed: {e}")
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[smooth_brain] load_project failed for {path}: {e}")
         return None
 
 
@@ -208,8 +207,8 @@ def list_recent_projects(base_dir: str = "", max_results: int = 10) -> List[Dict
                     "age_str": age_str,
                     "saved_at": saved_at,
                 })
-            except Exception:
-                pass
+            except (json.JSONDecodeError, OSError, KeyError):
+                continue
 
     projects.sort(key=lambda p: p["saved_at"], reverse=True)
     return projects[:max_results]
@@ -239,8 +238,8 @@ def copy_to_project(src_path: str, project_dir: str, subfolder: str) -> str:
     try:
         shutil.copy2(src_path, dest)
         return dest
-    except Exception as e:
-        print(f"[smooth_brain] copy_to_project failed: {e}")
+    except OSError as e:
+        print(f"[smooth_brain] copy_to_project failed for {src_path} -> {dest}: {e}")
         return src_path
 
 
@@ -261,45 +260,9 @@ def scan_project_gallery(project_dir: str, subfolder: str, extensions: List[str]
     return files
 
 
-# ── Legacy JSON autosave (kept for migration) ────────────────────────────────
-
-def save_session(session: SmoothBrainSession) -> None:
-    try:
-        data = asdict(session)
-        data["saved_at"] = time.time()
-        with open(AUTOSAVE_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"[smooth_brain] autosave failed: {e}")
-
-
-def load_session() -> Optional[SmoothBrainSession]:
-    try:
-        if not os.path.exists(AUTOSAVE_PATH):
-            return None
-        with open(AUTOSAVE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        session = SmoothBrainSession(**{
-            k: v for k, v in data.items()
-            if k in SmoothBrainSession.__dataclass_fields__
-        })
-        session.shots = [ShotState(**s) for s in data.get("shots", [])]
-        return session
-    except Exception as e:
-        print(f"[smooth_brain] session load failed: {e}")
-        return None
-
-
 def clear_session() -> None:
-    try:
-        if os.path.exists(AUTOSAVE_PATH):
-            os.remove(AUTOSAVE_PATH)
-    except Exception:
-        pass
-
-
-def session_age_minutes(session: SmoothBrainSession) -> int:
-    return max(0, int((time.time() - session.saved_at) / 60))
+    """No-op for legacy session cleanup."""
+    pass
 
 
 # ── Render param builder ─────────────────────────────────────────────────────

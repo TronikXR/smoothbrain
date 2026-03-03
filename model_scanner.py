@@ -359,8 +359,8 @@ def scan_profiles(model_id: str) -> list[dict]:
             with open(json_path, encoding="utf-8") as f:
                 data = json.load(f)
             arch = data.get("model", {}).get("architecture", "")
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[model_scanner] Failed to read architecture for {model_id}: {e}")
 
     if not arch:
         return []
@@ -401,7 +401,8 @@ def scan_profiles(model_id: str) -> list[dict]:
                 with open(os.path.join(dir_path, fname), encoding="utf-8") as f:
                     params = json.load(f)
                 profiles.append({"name": fname[:-5], "params": params})
-            except Exception:
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[model_scanner] Skipping profile {fname}: {e}")
                 continue
 
     profiles.sort(key=lambda p: p["name"])
