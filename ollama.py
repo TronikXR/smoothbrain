@@ -303,13 +303,14 @@ def detect_model() -> Optional[str]:
                 )
                 if match:
                     return match
-            return None
+            # Final fallback: return the first model we found (sorted alphabetically for determinism)
+            return sorted(models)[0]
     except Exception:
         return None
 
 
-def get_model_name() -> str:
-    """Get the best available model, caching the result."""
+def get_model_name() -> Optional[str]:
+    """Get the best available model, caching the result. Returns None if no models."""
     global _cached_model
     if _cached_model:
         return _cached_model
@@ -318,7 +319,9 @@ def get_model_name() -> str:
         _cached_model = detected
         print(f"[smooth_brain/ollama] detected model: {detected}")
         return detected
-    return DEFAULT_MODEL
+    # If no model was detected online, we don't return DEFAULT_MODEL
+    # because that model might not even be installed.
+    return None
 
 
 def clear_model_cache() -> None:
@@ -379,19 +382,27 @@ def _extract_json_array(text: str) -> Optional[List[Any]]:
 def _generate(model: str, system: str, prompt: str, temperature: float = 0.9, max_tokens: int = 4096) -> str:
     """Call Ollama /api/generate and return the response text."""
     with _client() as c:
-        r = c.post("/api/generate", json={
-            "model": model,
-            "prompt": prompt,
-            "system": system,
-            "stream": False,
-            "keep_alive": 0,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens,
-            },
-        }, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json().get("response", "")
+        try:
+            r = c.post("/api/generate", json={
+                "model": model,
+                "prompt": prompt,
+                "system": system,
+                "stream": False,
+                "keep_alive": 0,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_tokens,
+                },
+            }, timeout=TIMEOUT)
+            r.raise_for_status()
+            return r.json().get("response", "")
+        except httpx.HTTPStatusError as e:
+            # Include response text in error message for better diagnostics
+            try:
+                err_body = e.response.text
+            except Exception:
+                err_body = "unavailable"
+            raise RuntimeError(f"Ollama error {e.response.status_code}: {err_body}") from e
 
 
 def describe_character_image(image_path: str) -> Optional[str]:
@@ -412,6 +423,9 @@ def describe_character_image(image_path: str) -> Optional[str]:
         return None
 
     model_name = get_model_name()
+    if not model_name:
+        return None
+
     system = (
         "You are a visual description specialist. Describe the character in this image in detail. "
         "Focus on: physical appearance, clothing, accessories, hair, posture, and any distinguishing features. "
@@ -544,6 +558,9 @@ def refine_single_prompt(
     )
 
     model_name = get_model_name()
+    if not model_name:
+        return raw_prompt
+
     try:
         refined = _generate(
             model_name, system,
@@ -612,6 +629,10 @@ def pack(
     )
 
     model_name = get_model_name()
+    if not model_name:
+        print("[smooth_brain/ollama] pack: no models available — using templates")
+        return _fallback_shots(concept, weights, count)
+
     try:
         raw = _generate(
             model_name,
