@@ -218,6 +218,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 label="Concept / Logline",
                 placeholder="A lone astronaut discovers a hidden message on a distant moon...",
                 lines=2,
+                interactive=True,
             )
 
         with gr.Row():
@@ -225,11 +226,13 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 choices=[3, 6, 10],
                 value=6,
                 label="Number of Shots",
+                interactive=True,
             )
             self.sb_vibe = gr.Radio(
                 choices=["cinematic", "vertical", "square"],
                 value="cinematic",
                 label="Vibe / Aspect Ratio",
+                interactive=True,
             )
 
         # ── Model pickers ──────────────────────────────────────────────────
@@ -239,6 +242,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
                 value="Simple",
                 label="Model Mode",
                 scale=0,
+                interactive=True,
             )
         self.sb_model_mode_info = gr.HTML(
             "<small style='color:var(--body-text-color-subdued)'>Simple: curated I2V models. Advanced: all models + finetunes.</small>"
@@ -614,7 +618,10 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         # Step 1→2: create project folder + prefill character description
         self.sb_step1_next.click(
             fn=self._enter_step2,
-            inputs=[self.sb_concept, self.sb_state],
+            inputs=[
+                self.sb_concept, self.sb_shot_count, self.sb_vibe,
+                self.sb_video_model, self.sb_image_model, self.sb_state
+            ],
             outputs=[*step_outputs, self.sb_char_description, self.sb_state, self.sb_asset_pool],
         )
         # sb_step2_next is wired in _wire_step2 (combines save + navigate)
@@ -650,6 +657,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             inputs=[
                 self.sb_concept,
                 self.sb_shot_count,
+                self.sb_vibe,
                 self.sb_video_model,
                 self.sb_image_model,
                 *genre_inputs,
@@ -740,12 +748,16 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         )
         return gr.update(choices=choices, value=best), hint
 
-    def _enter_step2(self, concept, sb_state):
+    def _enter_step2(self, concept, shot_count, vibe, video_model, image_model, sb_state):
         """Step 1→2: create project folder if not yet created, save state."""
         sb_state = dict(sb_state)
         if not sb_state.get("project_dir"):
             sb_state["project_dir"] = create_project_dir(concept)
         sb_state["concept"] = concept
+        sb_state["shot_count"] = int(shot_count)
+        sb_state["vibe"] = vibe
+        sb_state["video_model"] = video_model
+        sb_state["image_model"] = image_model
         sb_state["current_step"] = 2
         save_project(sb_state)
         char_gallery = self._refresh_gallery(sb_state, "characters")
@@ -833,7 +845,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
             vid_gallery,                             # sb_video_gallery
         ]
 
-    def _do_roll(self, concept, shot_count, video_model, image_model, *genre_sliders):
+    def _do_roll(self, concept, shot_count, vibe, video_model, image_model, *genre_sliders):
         shot_count = int(shot_count)
         weights = {g: int(v) for g, v in zip(ALL_GENRES, genre_sliders)}
 
@@ -869,6 +881,7 @@ class SmoothBrainPlugin(WAN2GPPlugin):
         state_dict.update({
             "concept": concept,
             "shot_count": shot_count,
+            "vibe": vibe,
             "genre_weights": weights,
             "video_model": video_model or "",
             "image_model": image_model or "",
