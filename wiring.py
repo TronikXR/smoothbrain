@@ -17,7 +17,10 @@ class WiringMixin:
         # Step 1→2: create project folder + prefill character description
         self.sb_step1_next.click(
             fn=self._enter_step2,
-            inputs=[self.sb_concept, self.sb_state],
+            inputs=[
+                self.sb_concept, self.sb_shot_count, self.sb_vibe,
+                self.sb_video_model, self.sb_image_model, self.sb_state
+            ],
             outputs=[*step_outputs, self.sb_char_description, self.sb_state, self.sb_asset_pool],
         )
         # sb_step2_next is wired in _wire_step2 (combines save + navigate)
@@ -45,6 +48,7 @@ class WiringMixin:
             inputs=[
                 self.sb_concept,
                 self.sb_shot_count,
+                self.sb_vibe,
                 self.sb_video_model,
                 self.sb_image_model,
                 *genre_inputs,
@@ -127,7 +131,7 @@ class WiringMixin:
         )
         # Stop character render button
         self.sb_char_stop_btn.click(
-            fn=self._stop_render,
+            fn=self._stop_char_render,
             inputs=[],
             outputs=[self.sb_char_stop_btn],
         )
@@ -196,7 +200,7 @@ class WiringMixin:
         )
         # Stop render button
         self.sb_stop_render_btn.click(
-            fn=self._stop_render,
+            fn=self._stop_image_render,
             inputs=[],
             outputs=[self.sb_stop_render_btn],
         )
@@ -309,12 +313,12 @@ class WiringMixin:
 
         # Stop video render buttons (top + bottom)
         self.sb_stop_video_btn.click(
-            fn=self._stop_render,
+            fn=self._stop_video_render,
             inputs=[],
             outputs=[self.sb_stop_video_btn],
         )
         self.sb_stop_video_btn_top.click(
-            fn=self._stop_render,
+            fn=self._stop_video_render,
             inputs=[],
             outputs=[self.sb_stop_video_btn_top],
         )

@@ -13,6 +13,11 @@ sys.modules['gradio'] = MagicMock()
 sys.modules['cv2'] = MagicMock()
 sys.modules['PIL'] = MagicMock()
 
+# Re-mock the plugin package structure if needed
+class MockPackage:
+    __path__ = []
+sys.modules['.'] = MockPackage()
+
 import ollama
 
 class TestOllamaRobust(unittest.TestCase):

@@ -73,7 +73,12 @@ def _http_request(method: str, path: str, data: Any = None, timeout: float = TIM
             except json.JSONDecodeError:
                 return body
     except urllib.error.HTTPError as e:
-        print(f"[smooth_brain/ollama] HTTP error: {method} {path} -> {e.code} {e.reason}")
+        # Include response text in error message for better diagnostics if it's a 500
+        try:
+            err_body = e.read().decode("utf-8")
+        except Exception:
+            err_body = "unavailable"
+        print(f"[smooth_brain/ollama] HTTP error: {method} {path} -> {e.code} {e.reason}: {err_body}")
     except urllib.error.URLError:
         # Expected if Ollama is not running
         pass
@@ -274,9 +279,10 @@ def detect_model() -> Optional[str]:
             )
             if match:
                 return match
-        # Final fallback: return the first model we found, rather than None
+        # Final fallback: return the first model we found, sorted alphabetically
+        models.sort()
         return models[0]
-    except Exception:
+    except (KeyError, AttributeError, TypeError, ValueError):
         return None
 
 def ensure_ollama_background():
@@ -334,19 +340,22 @@ def _extract_json_array(text: str) -> Optional[List[Any]]:
     try:
         res = json.loads(text.strip())
         if isinstance(res, list): return res
-    except: pass
+    except (json.JSONDecodeError, ValueError):
+        pass
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if m:
         try:
             res = json.loads(m.group(1).strip())
             if isinstance(res, list): return res
-        except: pass
+        except (json.JSONDecodeError, ValueError):
+            pass
     m2 = re.search(r"\[[\s\S]*\]", text)
     if m2:
         try:
             res = json.loads(m2.group(0))
             if isinstance(res, list): return res
-        except: pass
+        except (json.JSONDecodeError, ValueError):
+            pass
     return None
 
 def _generate(model: str, system: str, prompt: str, temperature: float = 0.9, max_tokens: int = 4096) -> str:
