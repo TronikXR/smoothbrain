@@ -1,4 +1,5 @@
 from __future__ import annotations
+# NOTE: Canonical render mixin retained to resolve branch merge conflicts.
 import os
 import glob
 import time

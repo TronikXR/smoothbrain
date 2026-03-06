@@ -1,4 +1,5 @@
 from __future__ import annotations
+# NOTE: Canonical wiring mixin retained to resolve branch merge conflicts.
 import os
 import gradio as gr
 from typing import Any, Dict, List, Optional

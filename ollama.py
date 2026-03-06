@@ -1,6 +1,9 @@
 # Smooth Brain — Ollama Integration
 # Port of TronikSlate/app/server/routes/ollama.ts
 # Handles model detection, prompt packing, prompt refinement, and auto-setup.
+#
+# NOTE: This file intentionally keeps the canonical implementation used by
+# Smooth Brain to avoid PR merge drift with other long-lived branches.
 
 from __future__ import annotations
 import json
