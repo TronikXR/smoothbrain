@@ -72,7 +72,7 @@ class RenderEngineMixin:
         """Build a single render task dict for process_tasks_cli."""
         try:
             defaults = self.get_default_settings(model_type)
-        except Exception:
+        except (AttributeError, KeyError, ValueError, OSError):
             defaults = {}
         # Start from model defaults only — do NOT inherit primary_settings
         # from main UI (which may have wrong step count, resolution, etc.)
@@ -153,7 +153,7 @@ class RenderEngineMixin:
                     "plugin_data": task.get("plugin_data", {}),
                 })
             return self.process_tasks_cli(queue, cli_state)
-        except Exception as e:
+        except (AttributeError, KeyError, ValueError, OSError) as e:
             log.error("Render failed: %s", e, exc_info=True)
             return False
 
@@ -257,7 +257,7 @@ class RenderEngineMixin:
 
         sb_state["resolution"] = resolution
         rendered = 0
-        self._render_cancelled = False
+        self._image_render_cancelled = False
 
         # Yield initial progress — show stop button
         yield _yield_state(
@@ -267,7 +267,7 @@ class RenderEngineMixin:
 
         for task_idx, shot_i in enumerate(to_render):
             # Check for cancellation
-            if self._render_cancelled:
+            if self._image_render_cancelled:
                 yield _yield_state(
                     f"<span style='color:orange'>🛑 Render stopped. {rendered}/{len(to_render)} shots completed.</span>",
                     sb_state, stop_btn_visible=False,
@@ -329,7 +329,7 @@ class RenderEngineMixin:
                 else:
                     s["status"] = STATUS_PENDING
 
-            except Exception as e:
+            except (AttributeError, KeyError, ValueError, OSError) as e:
                 log.error("Shot %d failed: %s", shot_i+1, e, exc_info=True)
                 s["status"] = STATUS_PENDING
 
@@ -369,7 +369,7 @@ class RenderEngineMixin:
                 log.info("Auto-selected speed profile: %s", profile['name'])
             else:
                 log.info("No speed profiles found for %s, using defaults", video_model)
-        except Exception as e:
+        except (AttributeError, KeyError, ValueError, OSError) as e:
             log.error("Profile scan failed: %s", e, exc_info=True)
 
         # Video status constants (reuse image ones)
@@ -449,7 +449,7 @@ class RenderEngineMixin:
                         )
                         try:
                             defaults = self.get_default_settings(video_model)
-                        except Exception:
+                        except (AttributeError, KeyError, ValueError, OSError):
                             defaults = {}
                         params = build_video_params(shot_obj, video_model, shot_duration, vibe, defaults)
                         res_str = VIDEO_RESOLUTION.get(vibe, {}).get(resolution, "832x480")
@@ -470,7 +470,7 @@ class RenderEngineMixin:
             return
 
         rendered = 0
-        self._render_cancelled = False
+        self._video_render_cancelled = False
 
         # Yield initial
         yield _yield_state(
@@ -480,7 +480,7 @@ class RenderEngineMixin:
 
         for task_idx, (shot_i, prompt, params) in enumerate(to_render):
             # Check for cancellation
-            if self._render_cancelled:
+            if self._video_render_cancelled:
                 yield _yield_state(
                     f"<span style='color:orange'>🛑 Render stopped. {rendered}/{len(to_render)} videos completed.</span>",
                     sb_state, stop_btn_visible=False,
@@ -503,7 +503,7 @@ class RenderEngineMixin:
             before_ts_ns = time.time_ns()
             try:
                 success = self._run_render_tasks([task])
-            except Exception as e:
+            except (AttributeError, KeyError, ValueError, OSError) as e:
                 log.error("Video render failed: %s", e, exc_info=True)
                 success = False
 
